@@ -12,8 +12,37 @@ repositories {
 dependencies {
     paperweight.paperDevBundle("26.3.build.+")
 
+    implementation("com.zaxxer:HikariCP:7.1.0")
+    implementation("org.postgresql:postgresql:42.7.13")
+    implementation("org.flywaydb:flyway-core:13.8.0")
+    implementation("org.flywaydb:flyway-database-postgresql:13.8.0")
+
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.1")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.10.1")
+}
+
+val integrationTest = sourceSets.create("integrationTest") {
+    compileClasspath += sourceSets.main.get().output
+    runtimeClasspath += sourceSets.main.get().output
+    resources.srcDir("src/test/resources")
+}
+
+configurations[integrationTest.implementationConfigurationName].extendsFrom(configurations.testImplementation.get())
+configurations[integrationTest.runtimeOnlyConfigurationName].extendsFrom(configurations.testRuntimeOnly.get())
+
+dependencies {
+    add(integrationTest.implementationConfigurationName, "io.zonky.test:embedded-postgres:2.2.2")
+    add(integrationTest.implementationConfigurationName,
+        enforcedPlatform("io.zonky.test.postgres:embedded-postgres-binaries-bom:18.6.0"))
+}
+
+val integrationTestTask = tasks.register<Test>("integrationTest") {
+    description = "Runs bootstrap tests against isolated native PostgreSQL databases."
+    group = "verification"
+    testClassesDirs = integrationTest.output.classesDirs
+    classpath = integrationTest.runtimeClasspath
+    useJUnitPlatform()
+    shouldRunAfter(tasks.test)
 }
 
 java {
@@ -21,6 +50,25 @@ java {
 }
 
 tasks {
+    check {
+        dependsOn(integrationTestTask)
+    }
+
+    shadowJar {
+        filesMatching("META-INF/services/**") {
+            duplicatesStrategy = DuplicatesStrategy.INCLUDE
+        }
+        mergeServiceFiles()
+        relocate("com.zaxxer.hikari", "com.omegarealm.core.internal.hikari")
+        relocate("org.postgresql", "com.omegarealm.core.internal.postgresql")
+        relocate("org.flywaydb", "com.omegarealm.core.internal.flyway")
+        exclude("META-INF/*.SF", "META-INF/*.RSA", "META-INF/*.DSA")
+        // Paper supplies SLF4J. Do not ship a competing API or logging backend.
+        dependencies {
+            exclude(dependency("org.slf4j:slf4j-api:.*"))
+        }
+    }
+
     test {
         useJUnitPlatform()
     }

@@ -6,14 +6,14 @@ server:
   # A lowercase label, such as development, staging or production (1-32 characters).
   environment: "development"
 
-# Settings for the next database slice; no connections are opened yet.
+# PostgreSQL must be available before player admission opens.
 database:
   host: "localhost"
   port: 5432
   database: "omega"
   username: "omega"
   # The variable NAME only. Never put a password in this file.
-  # Its value will be required when database startup is implemented.
+  # Its value must be nonblank in the server process environment at startup.
   password-env: "OMEGA_DB_PASSWORD"
   # Positive integer. Start small; tune using measurements.
   pool-size: 5
