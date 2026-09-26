@@ -31,6 +31,13 @@ final class PostgresDatabase implements Database {
     }
 
     @Override
+    public void discardConnection(Connection connection) throws SQLException {
+        // Evict while the handle is checked out: Hikari closes the physical connection.
+        // Do not recycle the invalid handle through close/reset after its pool entry is gone.
+        pool.evictConnection(connection);
+    }
+
+    @Override
     public void close() {
         closePool(pool);
     }

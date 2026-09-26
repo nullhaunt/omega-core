@@ -117,6 +117,7 @@ public final class PostgresBootstrap implements DatabaseBootstrap {
         source.setOptions("-c statement_timeout=15000 -c lock_timeout=10000");
 
         HikariConfig poolConfig = new HikariConfig();
+        poolConfig.setExceptionOverride(new ControlledSqlExceptions());
         poolConfig.setDataSource(source);
         poolConfig.setPoolName("omega-database");
         poolConfig.setMaximumPoolSize(config.poolSize());

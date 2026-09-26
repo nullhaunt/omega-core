@@ -1,0 +1,634 @@
+package com.omegarealm.core.database;
+
+import com.omegarealm.core.config.DatabaseConfig;
+import com.omegarealm.core.player.*;
+import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.time.Instant;
+import java.util.UUID;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Logger;
+
+import static com.omegarealm.core.player.PersistenceException.Kind.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+@Timeout(30)
+class PlayerSessionRepositoryIntegrationTest {
+
+    private static final Instant JOINED = Instant.parse("2026-09-26T12:00:00Z");
+    @TempDir
+    static Path directory;
+    private static EmbeddedPostgres postgres;
+
+    @BeforeAll
+    static void startPostgres() throws Exception {
+        postgres = EmbeddedPostgres.builder().setPort(0)
+                .setDataDirectory(directory.resolve("postgres-data").toFile()).start();
+    }
+
+    @AfterAll
+    static void stopPostgres() throws Exception {
+        if (postgres != null) {
+            postgres.close();
+        }
+    }
+
+    private static void seedLegacy(DatabaseConfig config, Path migrations, boolean conflicting) throws Exception {
+        try (Database database = bootstrap(config, "filesystem:" + migrations).initialize();
+             Connection admin = admin(config); Statement statement = admin.createStatement()) {
+            statement.executeUpdate("INSERT INTO players (uuid, username, first_seen_at, last_seen_at) VALUES ('00000000-0000-0000-0000-000000000001', 'Legacy', now(), now())");
+            String left = conflicting ? "NULL" : "now()";
+            statement.executeUpdate("INSERT INTO player_sessions (id, player_uuid, server_id, joined_at, left_at) VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000001', 'alpha', now(), " + left + ")");
+            if (conflicting) {
+                statement.executeUpdate("INSERT INTO player_sessions (id, player_uuid, server_id, joined_at) SELECT gen_random_uuid(), player_uuid, server_id, joined_at FROM player_sessions");
+            }
+        }
+    }
+
+    private static SessionStart start(String username, Instant joinedAt) {
+        return new SessionStart(UUID.randomUUID(), UUID.randomUUID(), username, joinedAt);
+    }
+
+    private static PostgresPlayerSessionRepository ready(Database database, String serverId) throws Exception {
+        var repository = PostgresPlayerSessionRepository.acquire(database, serverId);
+        try {
+            repository.recoverInterrupted(JOINED);
+            return repository;
+        } catch (Exception failure) {
+            repository.close();
+            throw failure;
+        }
+    }
+
+    private static Database database() throws Exception {
+        return bootstrap(isolatedConfig(3), "classpath:db/migration").initialize();
+    }
+
+    private static DatabaseConfig isolatedConfig(int poolSize) throws Exception {
+        String name = "omega_player_test_" + UUID.randomUUID().toString().replace("-", "");
+        try (Connection connection = postgres.getPostgresDatabase().getConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE DATABASE " + name);
+        }
+        return new DatabaseConfig("127.0.0.1", postgres.getPort(), name, "postgres", "TEST_PASSWORD", poolSize);
+    }
+
+    private static Connection admin(DatabaseConfig config) throws SQLException {
+        return postgres.getDatabase("postgres", config.database()).getConnection();
+    }
+
+    private static long scalar(Connection connection, String sql) throws SQLException {
+        try (Statement statement = connection.createStatement(); ResultSet result = statement.executeQuery(sql)) {
+            assertTrue(result.next());
+            return result.getLong(1);
+        }
+    }
+
+    private static PostgresBootstrap bootstrap(DatabaseConfig config, String location) {
+        Logger logger = Logger.getAnonymousLogger();
+        logger.setUseParentHandlers(false);
+        return new PostgresBootstrap(config, ignored -> "test-only-password", logger,
+                PlayerSessionRepositoryIntegrationTest.class.getClassLoader(), location);
+    }
+
+    @Test
+    void preparationReadsDoNotCreatePlayersOrSessions() throws Exception {
+        DatabaseConfig config = isolatedConfig(2);
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha")) {
+            assertTrue(repository.findPlayer(UUID.randomUUID()).isEmpty());
+            assertTrue(repository.findSession(UUID.randomUUID()).isEmpty());
+            try (Connection admin = admin(config)) {
+                assertEquals(0, scalar(admin, "SELECT count(*) FROM players"));
+                assertEquals(0, scalar(admin, "SELECT count(*) FROM player_sessions"));
+            }
+        }
+    }
+
+    @Test
+    void firstJoinReturningJoinAndRenamePreserveIdentity() throws Exception {
+        try (Database database = database(); var repository = ready(database, "alpha")) {
+            SessionStart first = start("Original", JOINED);
+            PlayerProfile created = repository.join(first);
+            assertEquals(first.playerUuid(), created.uuid());
+            assertEquals(JOINED, created.firstSeenAt());
+            assertEquals(JOINED, created.lastSeenAt());
+            assertEquals(created, repository.findPlayer(first.playerUuid()).orElseThrow());
+
+            Instant left = JOINED.plusSeconds(60);
+            assertTrue(repository.endSession(first.sessionId(), left, SessionEnd.QUIT));
+            SessionStart returning = new SessionStart(UUID.randomUUID(), first.playerUuid(),
+                    "Renamed", JOINED.plusSeconds(120));
+            PlayerProfile updated = repository.join(returning);
+            assertEquals(created.uuid(), updated.uuid());
+            assertEquals(created.firstSeenAt(), updated.firstSeenAt());
+            assertEquals("Renamed", updated.username());
+            assertEquals(returning.joinedAt(), updated.lastSeenAt());
+
+            PlayerSession originalSession = repository.findSession(first.sessionId()).orElseThrow();
+            assertEquals(SessionEnd.QUIT, originalSession.endReason());
+            assertEquals(left, originalSession.leftAt());
+            assertNull(originalSession.recoveredAt());
+            assertNull(repository.findSession(returning.sessionId()).orElseThrow().endReason());
+        }
+    }
+
+    @Test
+    void duplicateJoinTokenIsIdempotentButConflictingInputsAreRejected() throws Exception {
+        try (Database database = database(); var repository = ready(database, "alpha")) {
+            SessionStart start = start("Player", JOINED.plusNanos(123456789));
+            PlayerProfile first = repository.join(start);
+            assertEquals(first, repository.join(start));
+            assertEquals(start.joinedAt(), repository.findSession(start.sessionId()).orElseThrow().joinedAt());
+
+            SessionStart collision = new SessionStart(start.sessionId(), UUID.randomUUID(), "Other", JOINED);
+            assertEquals(SESSION_CONFLICT, assertThrows(PersistenceException.class,
+                    () -> repository.join(collision)).kind());
+            assertTrue(repository.findPlayer(collision.playerUuid()).isEmpty());
+        }
+    }
+
+    @Test
+    void duplicateOpenSessionRollsBackRenameAndLastSeen() throws Exception {
+        try (Database database = database(); var repository = ready(database, "alpha")) {
+            SessionStart first = start("Original", JOINED);
+            PlayerProfile original = repository.join(first);
+            SessionStart duplicate = new SessionStart(UUID.randomUUID(), first.playerUuid(),
+                    "Uncommitted", JOINED.plusSeconds(60));
+
+            PersistenceException failure = assertThrows(PersistenceException.class,
+                    () -> repository.join(duplicate));
+            assertEquals(SESSION_CONFLICT, failure.kind());
+            assertEquals(original, repository.findPlayer(first.playerUuid()).orElseThrow());
+            assertTrue(repository.findSession(duplicate.sessionId()).isEmpty());
+            repository.checkOwnership();
+        }
+    }
+
+    @Test
+    void lateQuitCannotCloseReconnectOrMoveLastSeenBackward() throws Exception {
+        try (Database database = database(); var repository = ready(database, "alpha")) {
+            SessionStart first = start("Player", JOINED);
+            repository.join(first);
+            Instant left = JOINED.plusSeconds(30);
+            assertTrue(repository.endSession(first.sessionId(), left, SessionEnd.QUIT));
+            SessionStart reconnect = new SessionStart(UUID.randomUUID(), first.playerUuid(),
+                    "Player", JOINED.plusSeconds(60));
+            repository.join(reconnect);
+
+            assertFalse(repository.endSession(first.sessionId(), left.plusSeconds(5), SessionEnd.QUIT));
+            assertNull(repository.findSession(reconnect.sessionId()).orElseThrow().endReason());
+            assertEquals(reconnect.joinedAt(), repository.findPlayer(first.playerUuid()).orElseThrow().lastSeenAt());
+            assertEquals(left, repository.findSession(first.sessionId()).orElseThrow().leftAt());
+        }
+    }
+
+    @Test
+    void unknownOrForeignSessionCannotBeClosed() throws Exception {
+        try (Database database = database();
+             var alpha = ready(database, "alpha"); var beta = ready(database, "beta")) {
+            SessionStart start = start("Player", JOINED);
+            alpha.join(start);
+            assertTrue(beta.findSession(start.sessionId()).isEmpty());
+            assertFalse(beta.endSession(start.sessionId(), JOINED.plusSeconds(10), SessionEnd.QUIT));
+            assertFalse(alpha.endSession(UUID.randomUUID(), JOINED, SessionEnd.QUIT));
+            assertNull(alpha.findSession(start.sessionId()).orElseThrow().endReason());
+        }
+    }
+
+    @Test
+    void invalidLeaveTimeRollsBackAndShutdownClosureIsIdempotent() throws Exception {
+        try (Database database = database(); var repository = ready(database, "alpha")) {
+            SessionStart start = start("Player", JOINED);
+            repository.join(start);
+            assertEquals(INVALID_SESSION_END, assertThrows(PersistenceException.class,
+                    () -> repository.endSession(start.sessionId(), JOINED.minusSeconds(1), SessionEnd.QUIT)).kind());
+            assertNull(repository.findSession(start.sessionId()).orElseThrow().leftAt());
+            assertEquals(JOINED, repository.findPlayer(start.playerUuid()).orElseThrow().lastSeenAt());
+
+            assertTrue(repository.endSession(start.sessionId(), JOINED.plusSeconds(10), SessionEnd.SHUTDOWN));
+            assertFalse(repository.endSession(start.sessionId(), JOINED.plusSeconds(20), SessionEnd.QUIT));
+            assertEquals(SessionEnd.SHUTDOWN, repository.findSession(start.sessionId()).orElseThrow().endReason());
+            assertThrows(IllegalArgumentException.class,
+                    () -> repository.endSession(start.sessionId(), JOINED, SessionEnd.INTERRUPTED));
+        }
+    }
+
+    @Test
+    void independentServersMayHaveSessionsForTheSameIdentity() throws Exception {
+        try (Database database = database();
+             var alpha = ready(database, "alpha"); var beta = ready(database, "beta")) {
+            SessionStart first = start("Player", JOINED);
+            alpha.join(first);
+            SessionStart second = new SessionStart(UUID.randomUUID(), first.playerUuid(), "Player", JOINED.plusSeconds(30));
+            beta.join(second);
+            alpha.endSession(first.sessionId(), JOINED.plusSeconds(10), SessionEnd.QUIT);
+            assertEquals(second.joinedAt(), beta.findPlayer(first.playerUuid()).orElseThrow().lastSeenAt());
+            assertNull(beta.findSession(second.sessionId()).orElseThrow().endReason());
+        }
+    }
+
+    @Test
+    void recoveryOnlyMarksThisServersAbandonedSessionsWithoutInventingPlaytime() throws Exception {
+        try (Database database = database(); var beta = ready(database, "beta")) {
+            SessionStart abandoned = start("Player", JOINED);
+            try (var alpha = ready(database, "alpha")) {
+                alpha.join(abandoned);
+            }
+            SessionStart other = start("Other", JOINED);
+            beta.join(other);
+
+            Instant recovered = JOINED.plusSeconds(3600);
+            try (var alpha = PostgresPlayerSessionRepository.acquire(database, "alpha")) {
+                assertEquals(1, alpha.recoverInterrupted(recovered));
+                assertEquals(0, alpha.recoverInterrupted(recovered.plusSeconds(1)));
+                PlayerSession session = alpha.findSession(abandoned.sessionId()).orElseThrow();
+                assertEquals(SessionEnd.INTERRUPTED, session.endReason());
+                assertNull(session.leftAt());
+                assertEquals(recovered, session.recoveredAt());
+                assertEquals(JOINED, alpha.findPlayer(abandoned.playerUuid()).orElseThrow().lastSeenAt());
+                assertNull(beta.findSession(other.sessionId()).orElseThrow().endReason());
+
+                alpha.join(new SessionStart(UUID.randomUUID(), abandoned.playerUuid(), "Player", recovered));
+                assertThrows(IllegalStateException.class, () -> alpha.recoverInterrupted(recovered));
+            }
+        }
+    }
+
+    @Test
+    void playerActivityRequiresSuccessfulStartupRecovery() throws Exception {
+        try (Database database = database();
+             var repository = PostgresPlayerSessionRepository.acquire(database, "alpha")) {
+            SessionStart start = start("Player", JOINED);
+            assertThrows(IllegalStateException.class, () -> repository.join(start));
+            assertThrows(IllegalStateException.class,
+                    () -> repository.endSession(start.sessionId(), JOINED, SessionEnd.QUIT));
+            assertEquals(0, repository.recoverInterrupted(JOINED));
+            repository.join(start);
+        }
+    }
+
+    @Test
+    void secondOwnerIsRejectedAndNormalCloseReleasesOwnership() throws Exception {
+        try (Database database = database()) {
+            var first = ready(database, "alpha");
+            try {
+                PersistenceException rejected = assertThrows(PersistenceException.class,
+                        () -> PostgresPlayerSessionRepository.acquire(database, "alpha"));
+                assertEquals(SERVER_ALREADY_OWNED, rejected.kind());
+                first.checkOwnership();
+            } finally {
+                first.close();
+            }
+            first.close();
+            assertEquals(OWNERSHIP_LOST, assertThrows(PersistenceException.class, first::checkOwnership).kind());
+            try (var replacement = ready(database, "alpha")) {
+                replacement.checkOwnership();
+            }
+        }
+    }
+
+    @Test
+    void simultaneousAcquisitionHasExactlyOneOwner() throws Exception {
+        try (Database database = database()) {
+            ExecutorService contenders = Executors.newFixedThreadPool(2);
+            CountDownLatch start = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            BlockingQueue<Boolean> outcomes = new LinkedBlockingQueue<>();
+            Callable<Void> contender = () -> {
+                assertTrue(start.await(5, TimeUnit.SECONDS));
+                try (var owner = PostgresPlayerSessionRepository.acquire(database, "alpha")) {
+                    outcomes.add(true);
+                    assertTrue(release.await(10, TimeUnit.SECONDS));
+                } catch (PersistenceException failure) {
+                    assertEquals(SERVER_ALREADY_OWNED, failure.kind());
+                    outcomes.add(false);
+                }
+                return null;
+            };
+            Future<Void> first = contenders.submit(contender);
+            Future<Void> second = contenders.submit(contender);
+            try {
+                start.countDown();
+                Boolean one = outcomes.poll(10, TimeUnit.SECONDS);
+                Boolean two = outcomes.poll(10, TimeUnit.SECONDS);
+                assertNotNull(one);
+                assertNotNull(two);
+                assertNotEquals(one, two);
+            } finally {
+                release.countDown();
+                contenders.shutdown();
+                assertTrue(contenders.awaitTermination(10, TimeUnit.SECONDS));
+            }
+            first.get();
+            second.get();
+        }
+    }
+
+    @Test
+    void lostBackendCannotWriteAfterReplacementTakesOwnership() throws Exception {
+        DatabaseConfig config = isolatedConfig(3);
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize()) {
+            var obsolete = ready(database, "alpha");
+            try {
+                try (Connection admin = admin(config); Statement statement = admin.createStatement()) {
+                    try (ResultSet result = statement.executeQuery("""
+                            SELECT pg_terminate_backend(pid) FROM pg_locks
+                            WHERE locktype = 'advisory' AND classid::bigint = 1330464583
+                              AND objid::bigint = (SELECT id FROM omega_servers WHERE server_id = 'alpha')
+                              AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                            """)) {
+                        assertTrue(result.next());
+                        assertTrue(result.getBoolean(1));
+                    }
+                }
+                try (var replacement = ready(database, "alpha")) {
+                    SessionStart stale = start("Stale", JOINED);
+                    assertThrows(PersistenceException.class, () -> obsolete.join(stale));
+                    assertTrue(replacement.findPlayer(stale.playerUuid()).isEmpty());
+                    assertTrue(replacement.findSession(stale.sessionId()).isEmpty());
+                    assertEquals(OWNERSHIP_LOST, assertThrows(PersistenceException.class,
+                            obsolete::checkOwnership).kind());
+                    replacement.join(start("Current", JOINED));
+                }
+            } finally {
+                obsolete.close();
+            }
+        }
+    }
+
+    @Test
+    void repositoryRejectsUseAndCloseFromAnotherThread() throws Exception {
+        try (Database database = database(); var repository = ready(database, "alpha")) {
+            ExecutorService otherThread = Executors.newSingleThreadExecutor();
+            try {
+                otherThread.submit(() -> {
+                    assertThrows(IllegalStateException.class, repository::checkOwnership);
+                    assertThrows(IllegalStateException.class, repository::close);
+                }).get(5, TimeUnit.SECONDS);
+            } finally {
+                otherThread.shutdown();
+                assertTrue(otherThread.awaitTermination(5, TimeUnit.SECONDS));
+            }
+            repository.checkOwnership();
+        }
+    }
+
+    @Test
+    void sessionInsertFailureRollsBackNewIdentityAndDiagnosticsAreSanitized() throws Exception {
+        DatabaseConfig config = isolatedConfig(3);
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha")) {
+            try (Connection admin = admin(config); Statement statement = admin.createStatement()) {
+                statement.execute("""
+                        CREATE FUNCTION reject_session() RETURNS trigger LANGUAGE plpgsql AS $$
+                        BEGIN RAISE EXCEPTION 'DO_NOT_LOG_THIS_SECRET'; END $$
+                        """);
+                statement.execute("CREATE TRIGGER reject_session BEFORE INSERT ON player_sessions FOR EACH ROW EXECUTE FUNCTION reject_session()");
+            }
+            SessionStart start = start("Player", JOINED);
+            PersistenceException failure = assertThrows(PersistenceException.class, () -> repository.join(start));
+            assertEquals(DATABASE_FAILURE, failure.kind());
+            assertTrue(failure.getMessage().contains("SQLSTATE P0001"));
+            assertFalse(failure.getMessage().contains("DO_NOT_LOG"));
+            assertNull(failure.getCause());
+            try (Connection admin = admin(config)) {
+                assertEquals(0, scalar(admin, "SELECT count(*) FROM players"));
+                assertEquals(0, scalar(admin, "SELECT count(*) FROM player_sessions"));
+            }
+            assertEquals(OWNERSHIP_LOST, assertThrows(PersistenceException.class, repository::checkOwnership).kind());
+        }
+    }
+
+    @Test
+    void closureFailureRollsBackSessionAndProfileTogether() throws Exception {
+        DatabaseConfig config = isolatedConfig(3);
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha")) {
+            SessionStart start = start("Player", JOINED);
+            repository.join(start);
+            try (Connection admin = admin(config); Statement statement = admin.createStatement()) {
+                statement.execute("""
+                        CREATE FUNCTION reject_player_update() RETURNS trigger LANGUAGE plpgsql AS $$
+                        BEGIN RAISE EXCEPTION 'DO_NOT_LOG_THIS_SECRET'; END $$
+                        """);
+                statement.execute("CREATE TRIGGER reject_player_update BEFORE UPDATE ON players FOR EACH ROW EXECUTE FUNCTION reject_player_update()");
+            }
+            assertThrows(PersistenceException.class,
+                    () -> repository.endSession(start.sessionId(), JOINED.plusSeconds(30), SessionEnd.QUIT));
+            try (Connection admin = admin(config)) {
+                assertEquals(1, scalar(admin, "SELECT count(*) FROM player_sessions WHERE left_at IS NULL AND end_reason IS NULL"));
+                try (Statement statement = admin.createStatement();
+                     ResultSet result = statement.executeQuery("SELECT last_seen_at FROM players")) {
+                    assertTrue(result.next());
+                    assertEquals(JOINED, result.getTimestamp(1).toInstant());
+                }
+            }
+        }
+    }
+
+    @Test
+    void brokenConnectionDiagnosticsDoNotLeakThroughHikariLogging() throws Exception {
+        DatabaseConfig config = isolatedConfig(3);
+        try (LogCapture capture = new LogCapture();
+             Database database = bootstrap(config, "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha")) {
+            org.slf4j.LoggerFactory.getLogger("com.zaxxer.hikari.pool.ProxyConnection").warn("Capture probe");
+            assertTrue(capture.messages.stream().anyMatch(message -> message.contains("Capture probe")));
+            capture.messages.clear();
+
+            try (Connection admin = admin(config); Statement statement = admin.createStatement()) {
+                statement.execute("""
+                        CREATE FUNCTION reject_broken_session() RETURNS trigger LANGUAGE plpgsql AS $$
+                        BEGIN RAISE EXCEPTION USING MESSAGE = 'DO_NOT_LOG_THIS_SECRET', ERRCODE = '08006'; END $$
+                        """);
+                statement.execute("CREATE TRIGGER reject_broken_session BEFORE INSERT ON player_sessions FOR EACH ROW EXECUTE FUNCTION reject_broken_session()");
+            }
+            PersistenceException failure = assertThrows(PersistenceException.class,
+                    () -> repository.join(start("Player", JOINED)));
+            assertTrue(failure.getMessage().contains("SQLSTATE 08006"));
+            assertNull(failure.getCause());
+            repository.close();
+            assertTrue(capture.messages.isEmpty(), "Hikari must not forward a raw broken-connection exception");
+        }
+    }
+
+    @Test
+    void interruptionDuringInsertRollsBackAndPreservesTheWorkerInterrupt() throws Exception {
+        DatabaseConfig config = isolatedConfig(3);
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize()) {
+            try (Connection admin = admin(config); Statement statement = admin.createStatement()) {
+                statement.execute("""
+                        CREATE FUNCTION delay_session() RETURNS trigger LANGUAGE plpgsql AS $$
+                        BEGIN PERFORM pg_sleep(2); RETURN NEW; END $$
+                        """);
+                statement.execute("CREATE TRIGGER delay_session BEFORE INSERT ON player_sessions FOR EACH ROW EXECUTE FUNCTION delay_session()");
+            }
+            ExecutorService worker = Executors.newSingleThreadExecutor();
+            AtomicReference<Thread> ownerThread = new AtomicReference<>();
+            CountDownLatch acquired = new CountDownLatch(1);
+            Future<Boolean> operation = worker.submit(() -> {
+                try (var repository = ready(database, "alpha")) {
+                    ownerThread.set(Thread.currentThread());
+                    acquired.countDown();
+                    PersistenceException failure = assertThrows(PersistenceException.class,
+                            () -> repository.join(start("Player", JOINED)));
+                    assertEquals(CANCELLED, failure.kind());
+                }
+                return Thread.currentThread().isInterrupted();
+            });
+            try {
+                assertTrue(acquired.await(5, TimeUnit.SECONDS));
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                boolean inserting = false;
+                try (Connection admin = admin(config)) {
+                    while (System.nanoTime() < deadline) {
+                        if (scalar(admin, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'OmegaCore' AND wait_event = 'PgSleep'") > 0) {
+                            inserting = true;
+                            break;
+                        }
+                        Thread.sleep(10);
+                    }
+                    assertTrue(inserting, "Interrupt must occur during real session insertion");
+                    ownerThread.get().interrupt();
+                    assertTrue(operation.get(10, TimeUnit.SECONDS));
+                    assertEquals(0, scalar(admin, "SELECT count(*) FROM players"));
+                    assertEquals(0, scalar(admin, "SELECT count(*) FROM player_sessions"));
+                }
+            } finally {
+                worker.shutdownNow();
+                assertTrue(worker.awaitTermination(10, TimeUnit.SECONDS));
+            }
+            try (var replacement = ready(database, "alpha")) {
+                replacement.checkOwnership();
+            }
+        }
+    }
+
+    @Test
+    void lockedPlayerWriteTimesOutWithoutCommittingOrLosingCleanup() throws Exception {
+        DatabaseConfig config = isolatedConfig(3);
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize()) {
+            SessionStart first = start("Original", JOINED);
+            var repository = ready(database, "alpha");
+            try {
+                repository.join(first);
+                repository.endSession(first.sessionId(), JOINED.plusSeconds(1), SessionEnd.QUIT);
+                try (Connection blocker = admin(config); Statement statement = blocker.createStatement()) {
+                    blocker.setAutoCommit(false);
+                    try (ResultSet result = statement.executeQuery("SELECT uuid FROM players FOR UPDATE")) {
+                        assertTrue(result.next());
+                    }
+                    SessionStart blocked = new SessionStart(UUID.randomUUID(), first.playerUuid(),
+                            "Uncommitted", JOINED.plusSeconds(2));
+                    long started = System.nanoTime();
+                    PersistenceException failure = assertThrows(PersistenceException.class,
+                            () -> repository.join(blocked));
+                    assertEquals(DATABASE_FAILURE, failure.kind());
+                    assertTrue(failure.getMessage().contains("SQLSTATE 57014"));
+                    assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(10));
+                    blocker.rollback();
+                }
+            } finally {
+                repository.close();
+            }
+            try (var replacement = ready(database, "alpha")) {
+                assertEquals("Original", replacement.findPlayer(first.playerUuid()).orElseThrow().username());
+                try (Connection admin = admin(config)) {
+                    assertEquals(1, scalar(admin, "SELECT count(*) FROM player_sessions"));
+                }
+            }
+        }
+    }
+
+    @Test
+    void schemaRejectsInvalidEndStatesAndDuplicateActiveSessions() throws Exception {
+        DatabaseConfig config = isolatedConfig(3);
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha")) {
+            SessionStart start = start("Player", JOINED);
+            repository.join(start);
+            try (Connection admin = admin(config); Statement statement = admin.createStatement()) {
+                assertThrows(SQLException.class, () -> statement.executeUpdate("UPDATE player_sessions SET left_at = joined_at"));
+                assertThrows(SQLException.class, () -> statement.executeUpdate("UPDATE player_sessions SET end_reason = 'QUIT'"));
+                assertThrows(SQLException.class, () -> statement.executeUpdate("UPDATE player_sessions SET end_reason = 'INTERRUPTED'"));
+                assertThrows(SQLException.class, () -> statement.executeUpdate("UPDATE player_sessions SET end_reason = 'UNKNOWN'"));
+                assertThrows(SQLException.class, () -> statement.executeUpdate("UPDATE player_sessions SET recovered_at = now()"));
+                assertThrows(SQLException.class, () -> statement.executeUpdate("""
+                        INSERT INTO player_sessions (id, player_uuid, server_id, joined_at)
+                        SELECT gen_random_uuid(), player_uuid, server_id, joined_at FROM player_sessions
+                        """));
+            }
+        }
+    }
+
+    @Test
+    void migrationPreservesLegacyHistoryAndRefusesConflictingOpenRows() throws Exception {
+        Path oldMigrations = Files.createDirectory(directory.resolve("legacy-" + UUID.randomUUID()));
+        for (String name : new String[]{"V001__create_players.sql", "V002__create_player_sessions.sql"}) {
+            try (var source = getClass().getResourceAsStream("/db/migration/" + name)) {
+                assertNotNull(source);
+                Files.writeString(oldMigrations.resolve(name), new String(source.readAllBytes(), StandardCharsets.UTF_8));
+            }
+        }
+        DatabaseConfig good = isolatedConfig(2);
+        seedLegacy(good, oldMigrations, false);
+        try (Database database = bootstrap(good, "classpath:db/migration").initialize();
+             Connection admin = admin(good)) {
+            assertEquals(1, scalar(admin, "SELECT count(*) FROM player_sessions WHERE end_reason = 'LEGACY' AND left_at IS NOT NULL"));
+        }
+
+        DatabaseConfig conflicting = isolatedConfig(2);
+        seedLegacy(conflicting, oldMigrations, true);
+        assertThrows(com.omegarealm.core.database.DatabaseException.class,
+                () -> bootstrap(conflicting, "classpath:db/migration").initialize());
+        try (Connection admin = admin(conflicting)) {
+            assertEquals(2, scalar(admin, "SELECT count(*) FROM player_sessions"));
+            assertEquals(2, scalar(admin, "SELECT count(*) FROM flyway_schema_history WHERE success"));
+            assertEquals(0, scalar(admin, "SELECT count(*) FROM information_schema.columns WHERE table_name = 'player_sessions' AND column_name = 'end_reason'"));
+        }
+    }
+
+    private static final class LogCapture extends AbstractAppender implements AutoCloseable {
+
+        private final org.apache.logging.log4j.core.Logger root;
+        private final CopyOnWriteArrayList<String> messages = new CopyOnWriteArrayList<>();
+
+        private LogCapture() {
+            super("PlayerPersistenceCapture", null, null, true, Property.EMPTY_ARRAY);
+            root = (org.apache.logging.log4j.core.Logger) LogManager.getRootLogger();
+            start();
+            root.addAppender(this);
+        }
+
+        @Override
+        public void append(LogEvent event) {
+            messages.add(event.getMessage().getFormattedMessage());
+            if (event.getThrown() != null) {
+                messages.add(event.getThrown().toString());
+            }
+        }
+
+        @Override
+        public void close() {
+            root.removeAppender(this);
+            stop();
+        }
+    }
+}

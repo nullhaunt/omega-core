@@ -10,6 +10,13 @@ public interface Database extends AutoCloseable {
 
     Connection openConnection() throws SQLException;
 
+    /**
+     * Permanently discard a failed checkout. Pools must evict instead of recycling it.
+     */
+    default void discardConnection(Connection connection) throws SQLException {
+        connection.close();
+    }
+
     @Override
     void close();
 }

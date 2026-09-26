@@ -22,10 +22,28 @@ A whitelist does not establish application readiness and is not used as the fail
 This policy covers failures handled by Omega's lifecycle adapter; deployment must still
 ensure Omega Core is present and can be loaded by Paper in the first place.
 
-This slice creates the player and session tables; it does not yet load players or record
-sessions. Repositories, player services, commands and the full gameplay scheduler come later.
-Readiness currently covers the database foundation. Future critical services must join the
-startup sequence before they can accept players.
+The persistence slice now supplies immutable player/session values and a blocking PostgreSQL
+repository. Profile reads have no side effects. A successful join atomically writes player
+metadata and opens its session; an exact session ID closes it on quit or shutdown. UUID owns
+identity, first-seen is preserved, and last-seen never moves backward. PostgreSQL enforces
+one open session per player per server. Interrupted sessions retain an unknown leave time
+and a separate recovery timestamp, so an outage is not recorded as playtime.
+
+Acquire, recover, use and close the repository on one dedicated I/O worker. It retains one
+pool connection and a PostgreSQL session advisory lock for `server.id`; a second owner is
+rejected. Every operation verifies ownership and uses that same connection. Failed owners
+cannot reconnect or resume writes. Close the repository before the database. Failed pooled
+connections are explicitly evicted; Hikari's raw exception logging is suppressed in favor
+of controlled phase/SQLSTATE diagnostics. SQL statements have a 5-second query timeout;
+existing connection, socket, startup and shutdown bounds remain unchanged.
+
+Paper connection handling is the next slice: player loading must finish before world entry,
+as described in the [player/session gate contract](docs/PLAYER_SESSIONS.md). The repository
+is not wired into `OmegaRuntime` yet. Running the plugin still performs database bootstrap
+only; it does not acquire server ownership, load player profiles, record joins/quits, or
+recover sessions. Readiness currently covers that database foundation. The player service
+and ownership checks must join startup before the new connection handling is enabled.
+Commands, authorization and the full gameplay scheduler remain future gates.
 
 ## Configuration
 
@@ -61,8 +79,9 @@ Use a Java 25 JDK, with `JAVA_HOME` pointing to that installation:
 ```
 
 `test` runs configuration, admission and lifecycle tests. `build` also runs `integrationTest`
-against an isolated PostgreSQL 18.6 instance, verifying migrations, rollback, checksum
-validation and pool cleanup. Native test binaries download through Gradle on the first run;
+against isolated PostgreSQL 18.6 instances, verifying migrations, rollback, checksum
+validation, player/session transactions, ownership, recovery and pool cleanup.
+Native test binaries download through Gradle on the first run;
 no existing database or Docker installation is used. Build success remains separate from
 Paper server verification.
 
