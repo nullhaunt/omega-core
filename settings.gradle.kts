@@ -1,1 +1,1 @@
-rootProject.name = "omega-core"
+rootProject.name = "OmegaCore"

@@ -11,6 +11,9 @@ repositories {
 
 dependencies {
     paperweight.paperDevBundle("26.3.build.+")
+
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.1")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.10.1")
 }
 
 java {
@@ -18,6 +21,10 @@ java {
 }
 
 tasks {
+    test {
+        useJUnitPlatform()
+    }
+
     build {
         dependsOn(shadowJar)
     }

@@ -1,0 +1,21 @@
+# Required settings are validated at startup. Changes require a server restart.
+# Existing files are never merged with defaults or overwritten on startup.
+server:
+  # 1-64 letters/digits/underscores/hyphens; start with a letter or digit.
+  id: "dev-01"
+  # A lowercase label, such as development, staging or production (1-32 characters).
+  environment: "development"
+
+# Settings for the next database slice; no connections are opened yet.
+database:
+  host: "localhost"
+  port: 5432
+  database: "omega"
+  username: "omega"
+  # The variable NAME only. Never put a password in this file.
+  # Its value will be required when database startup is implemented.
+  password-env: "OMEGA_DB_PASSWORD"
+  # Positive integer. Start small; tune using measurements.
+  pool-size: 5
+
+debug: false
