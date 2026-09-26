@@ -1,0 +1,9 @@
+name: OmegaCore
+main: com.omegarealm.core.OmegaPlugin
+version: ${version}
+description: ${description}
+author: Unreference
+website: https://omegarealm.com/
+load: STARTUP
+api-version: 26.3
+
