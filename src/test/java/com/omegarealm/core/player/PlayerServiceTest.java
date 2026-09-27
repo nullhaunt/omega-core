@@ -1,5 +1,8 @@
 package com.omegarealm.core.player;
 
+import com.omegarealm.core.authorization.AuthorizationSnapshot;
+import com.omegarealm.core.authorization.Role;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -68,6 +71,167 @@ class PlayerServiceTest {
             Thread.sleep(5);
         }
         assertTrue(condition.getAsBoolean());
+    }
+
+    @Test
+    void loadedAuthorityRemainsConnectionOwnedAndQuitRemovesItBeforePersistence() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        repository.read = uuid -> Optional.of(new PlayerProfile(uuid, "Player", JOINED, JOINED));
+        repository.authorization = uuid -> new AuthorizationSnapshot(uuid, Role.ADMIN, 7);
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        repository.end = () -> {
+            entered.countDown();
+            waitFor(release);
+        };
+
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            PlayerAttempt player = attempt();
+            PreparedPlayer prepared = await(harness.service.prepare(player));
+            assertEquals(Role.ADMIN, prepared.authorization().role());
+            assertEquals(7, prepared.authorization().revision());
+            assertEquals(prepared.authorization(), harness.service.authorization(player.token()).orElseThrow());
+            assertTrue(harness.service.authorization(player.identity().uuid()).isEmpty());
+            await(harness.service.activate(player.token(), JOINED));
+            assertEquals(prepared.authorization(), harness.service.authorization(player.token()).orElseThrow());
+            CompletionStage<Void> quitting = harness.service.disconnect(player.token(), JOINED.plusSeconds(1));
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                assertTrue(harness.service.authorization(player.token()).isEmpty());
+            } finally {
+                release.countDown();
+            }
+            await(quitting);
+            assertTrue(harness.service.authorization(player.token()).isEmpty());
+        }
+    }
+
+    @Test
+    void disconnectDuringAuthorizationLoadCannotPublishOldRoleOverReconnect() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        repository.read = uuid -> Optional.of(new PlayerProfile(uuid, "Player", JOINED, JOINED));
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        repository.authorization = uuid -> {
+            if (repository.reads.get() == 1) {
+                entered.countDown();
+                waitFor(release);
+                return new AuthorizationSnapshot(uuid, Role.OWNER, 3);
+            }
+            return new AuthorizationSnapshot(uuid, Role.PLAYER, 4);
+        };
+
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            PlayerAttempt old = attempt();
+            CompletionStage<PreparedPlayer> loading = harness.service.prepare(old);
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                assertFalse(harness.service.isPrepared(old.token()));
+                assertTrue(harness.service.authorization(old.token()).isEmpty());
+                await(harness.service.disconnect(old.token(), JOINED));
+                assertFailure(CANCELLED, loading);
+                PlayerAttempt reconnect = new PlayerAttempt(UUID.randomUUID(), old.identity());
+                CompletionStage<PreparedPlayer> current = harness.service.prepare(reconnect);
+                release.countDown();
+                PreparedPlayer prepared = await(current);
+                assertEquals(Role.PLAYER, prepared.authorization().role());
+                assertEquals(4, prepared.authorization().revision());
+                assertTrue(harness.service.authorization(old.token()).isEmpty());
+                assertEquals(prepared.authorization(), harness.service.authorization(reconnect.token()).orElseThrow());
+                assertEquals(0, repository.joins.size());
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    void authorizationLoadSharesPreparationDeadlineAndLateResultIsDiscarded() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        repository.authorization = uuid -> {
+            entered.countDown();
+            waitFor(release);
+            return AuthorizationSnapshot.initial(uuid);
+        };
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            PlayerAttempt player = attempt();
+            CompletionStage<PreparedPlayer> loading = harness.service.prepare(player);
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                harness.clock.lastDeadline.run();
+                assertFailure(TIMED_OUT, loading);
+                release.countDown();
+                harness.barrier();
+                assertFalse(harness.service.isPrepared(player.token()));
+                assertTrue(harness.service.authorization(player.token()).isEmpty());
+                assertEquals(0, repository.joins.size());
+                assertTrue(harness.failures.isEmpty());
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    void shutdownDuringAuthorizationLoadCannotPublishLateAuthority() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        repository.authorization = uuid -> {
+            entered.countDown();
+            waitFor(release);
+            return AuthorizationSnapshot.initial(uuid);
+        };
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            PlayerAttempt player = attempt();
+            CompletionStage<PreparedPlayer> loading = harness.service.prepare(player);
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                harness.service.requestStop(JOINED);
+                assertFailure(UNAVAILABLE, loading);
+                release.countDown();
+                harness.barrier();
+                assertTrue(harness.service.authorization(player.token()).isEmpty());
+                assertFalse(harness.service.isPrepared(player.token()));
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    void authorizationFailureClosesAllSnapshotAccessAndOmitsRawDiagnostic() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            PlayerAttempt active = attempt();
+            await(harness.service.prepare(active));
+            await(harness.service.activate(active.token(), JOINED));
+            assertTrue(harness.service.authorization(active.token()).isPresent());
+
+            repository.authorization = uuid -> {
+                throw new IllegalStateException("DO_NOT_LOG_THIS_SECRET");
+            };
+            assertFailure(UNAVAILABLE, harness.service.prepare(attempt()));
+            assertFalse(harness.service.isRunning());
+            assertTrue(harness.service.authorization(active.token()).isEmpty());
+            assertEquals(1, harness.failures.size());
+            assertFalse(harness.failures.getFirst().contains("DO_NOT_LOG"));
+        }
+    }
+
+    @Test
+    void mismatchedLoadedAuthorizationCannotPrepareAConnection() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        repository.authorization = uuid -> AuthorizationSnapshot.initial(UUID.randomUUID());
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            PlayerAttempt player = attempt();
+            assertFailure(UNAVAILABLE, harness.service.prepare(player));
+            assertFalse(harness.service.isPrepared(player.token()));
+            assertTrue(harness.service.authorization(player.token()).isEmpty());
+            assertEquals(1, harness.failures.size());
+        }
     }
 
     @Test
@@ -165,8 +329,10 @@ class PlayerServiceTest {
         try (Harness harness = new Harness(repository, shortPreparation)) {
             PlayerAttempt abandoned = attempt();
             await(harness.service.prepare(abandoned));
+            assertTrue(harness.service.authorization(abandoned.token()).isPresent());
             assertFailure(BUSY, harness.service.prepare(attempt()));
             waitUntil(() -> !harness.service.isPrepared(abandoned.token()));
+            assertTrue(harness.service.authorization(abandoned.token()).isEmpty());
             await(harness.service.prepare(new PlayerAttempt(UUID.randomUUID(), abandoned.identity())));
             assertEquals(0, repository.joins.size());
         }
@@ -486,6 +652,7 @@ class PlayerServiceTest {
             await(harness.service.prepare(player));
             harness.service.requestStop(JOINED.plusSeconds(30));
             assertFalse(harness.service.isPrepared(player.token()));
+            assertTrue(harness.service.authorization(player.token()).isEmpty());
             assertFailure(UNAVAILABLE, harness.service.prepare(attempt()));
             assertTrue(harness.clock.getQueue().isEmpty());
             assertEquals(0, repository.joins.size());
@@ -555,6 +722,7 @@ class PlayerServiceTest {
         private final List<SessionStart> joins = new CopyOnWriteArrayList<>();
         private final List<End> ends = new CopyOnWriteArrayList<>();
         private volatile Function<UUID, Optional<PlayerProfile>> read = uuid -> Optional.empty();
+        private volatile Function<UUID, AuthorizationSnapshot> authorization = AuthorizationSnapshot::initial;
         private volatile Consumer<SessionStart> join = start -> {
         };
         private volatile Runnable end = () -> {
@@ -569,6 +737,11 @@ class PlayerServiceTest {
             events.add("recover");
             recoveries.incrementAndGet();
             return 0;
+        }
+
+        @Override
+        public LoadedPlayer loadPlayer(UUID uuid) {
+            return new LoadedPlayer(findPlayer(uuid), authorization.apply(uuid));
         }
 
         @Override

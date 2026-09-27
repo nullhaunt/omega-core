@@ -265,7 +265,7 @@ class PlayerRuntimeIntegrationTest {
             blocker.setAutoCommit(false);
             statement.execute("LOCK TABLE players IN ACCESS EXCLUSIVE MODE");
             CompletionStage<PreparedPlayer> blocked = service.prepare(first);
-            waitForQuery(config, "wait_event_type = 'Lock' AND query LIKE '%FROM players WHERE uuid%'");
+            waitForQuery(config, "wait_event_type = 'Lock' AND query LIKE '%LEFT JOIN player_authorizations%'");
             await(service.disconnect(first.token(), Instant.now()));
             ExecutionException cancelled = assertThrows(ExecutionException.class,
                     () -> blocked.toCompletableFuture().get(2, TimeUnit.SECONDS));

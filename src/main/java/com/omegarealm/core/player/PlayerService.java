@@ -1,5 +1,7 @@
 package com.omegarealm.core.player;
 
+import com.omegarealm.core.authorization.AuthorizationSnapshot;
+
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -95,6 +97,22 @@ public final class PlayerService {
         synchronized (ownership) {
             Entry entry = attempts.get(token);
             return state == State.RUNNING && entry != null && entry.phase == Phase.PREPARED;
+        }
+    }
+
+    /**
+     * Reads the snapshot owned by this exact prepared/joining/active connection without I/O.
+     * Callers must recheck this boundary; a previously returned value is not a live credential.
+     */
+    public Optional<AuthorizationSnapshot> authorization(UUID token) {
+        Objects.requireNonNull(token, "token");
+        synchronized (ownership) {
+            Entry entry = attempts.get(token);
+            if (state != State.RUNNING || entry == null
+                    || (entry.phase != Phase.PREPARED && entry.phase != Phase.JOINING && entry.phase != Phase.ACTIVE)) {
+                return Optional.empty();
+            }
+            return Optional.ofNullable(entry.authorization);
         }
     }
 
@@ -213,6 +231,7 @@ public final class PlayerService {
                     }
                     cancel(entry.deadline);
                     entry.phase = Phase.CLOSING;
+                    entry.authorization = null;
                     entry.leftAt = left;
                     entry.deadline = mutationDeadline(entry, Phase.CLOSING);
                     saturated = mailboxFull();
@@ -392,13 +411,14 @@ public final class PlayerService {
                 return;
             }
         }
-        PreparedPlayer prepared = new PreparedPlayer(entry.attempt,
-                repository.findPlayer(entry.attempt.identity().uuid()));
+        LoadedPlayer loaded = repository.loadPlayer(entry.attempt.identity().uuid());
+        PreparedPlayer prepared = new PreparedPlayer(entry.attempt, loaded.storedProfile(), loaded.authorization());
         synchronized (ownership) {
             if (state != State.RUNNING || entry.phase != Phase.LOADING) {
                 return;
             }
             cancel(entry.deadline);
+            entry.authorization = prepared.authorization();
             entry.phase = Phase.PREPARED;
             entry.deadline = deadlines.schedule(() -> expire(entry, Phase.PREPARED),
                     limits.preparedTimeout().toNanos(), TimeUnit.NANOSECONDS);
@@ -467,6 +487,7 @@ public final class PlayerService {
     }
 
     private void remove(Entry entry) {
+        entry.authorization = null;
         cancel(entry.deadline);
         attempts.remove(entry.attempt.token(), entry);
         currentPlayers.remove(entry.attempt.identity().uuid(), entry);
@@ -527,6 +548,7 @@ public final class PlayerService {
         cancel(ownershipDeadline);
         ownershipCheckPending = false;
         for (Entry entry : attempts.values()) {
+            entry.authorization = null;
             cancel(entry.deadline);
         }
     }
@@ -567,6 +589,7 @@ public final class PlayerService {
         private final CompletableFuture<PlayerProfile> activation = new CompletableFuture<>();
         private final CompletableFuture<Void> departure = new CompletableFuture<>();
         private Phase phase = Phase.LOADING;
+        private AuthorizationSnapshot authorization;
         private ScheduledFuture<?> deadline;
         private Instant joinedAt;
         private Instant leftAt;

@@ -70,9 +70,15 @@ Players have one role in the `PLAYER`, `MODERATOR`, `ADMIN`, `OWNER` hierarchy. 
 manage moderator roles; owners may also manage admin roles; owner changes require the local
 console. Peer/superior targets and self-changes are protected. The
 [authorization contract](docs/AUTHORIZATION.md) records the policy and remaining gates.
-This model is not yet connected to player loading or Paper permission enforcement.
-Role persistence, live updates, command masking, vanilla permissions and entity/region
-gameplay scheduling remain future gates.
+Role persistence now supplies one realm-wide role/revision record per persisted player UUID.
+Preparation reads profile and authorization together before world entry; a first successful
+join atomically creates the default `PLAYER` record with player/session history. Reconnect
+does not reset elevated roles or revisions. The player service exposes snapshots by exact
+connection token and closes access on disconnect, failure or stop. Missing or invalid authority
+for an existing player fails closed rather than silently granting a default role.
+Role management writes, live updates, command masking, vanilla permission enforcement and
+entity/region gameplay scheduling remain future gates. Loading a role does not yet change
+Minecraft permissions or OP status.
 
 ## Configuration
 

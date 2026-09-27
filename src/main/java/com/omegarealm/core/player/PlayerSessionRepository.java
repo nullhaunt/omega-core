@@ -10,6 +10,11 @@ import java.util.UUID;
  */
 public interface PlayerSessionRepository extends AutoCloseable {
 
+    /**
+     * Loads profile and authorization consistently; does not create either record.
+     */
+    LoadedPlayer loadPlayer(UUID playerUuid) throws PersistenceException;
+
     Optional<PlayerProfile> findPlayer(UUID playerUuid) throws PersistenceException;
 
     Optional<PlayerSession> findSession(UUID sessionId) throws PersistenceException;

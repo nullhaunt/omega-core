@@ -2,6 +2,7 @@ package com.omegarealm.core.player.paper;
 
 import com.destroystokyo.paper.event.player.PlayerConnectionCloseEvent;
 import com.omegarealm.core.RuntimeState;
+import com.omegarealm.core.authorization.AuthorizationSnapshot;
 import com.omegarealm.core.player.*;
 import io.papermc.paper.connection.PlayerConfigurationConnection;
 import io.papermc.paper.connection.PlayerConnection;
@@ -359,6 +360,11 @@ class PlayerConnectionAdapterTest {
         private final CountDownLatch release = new CountDownLatch(1);
         private volatile boolean blockRead;
         private volatile boolean blockJoin;
+
+        @Override
+        public LoadedPlayer loadPlayer(UUID uuid) {
+            return new LoadedPlayer(findPlayer(uuid), AuthorizationSnapshot.initial(uuid));
+        }
 
         @Override
         public Optional<com.omegarealm.core.player.PlayerProfile> findPlayer(UUID uuid) {

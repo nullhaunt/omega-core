@@ -1,5 +1,7 @@
 package com.omegarealm.core.player;
 
+import com.omegarealm.core.authorization.AuthorizationSnapshot;
+import com.omegarealm.core.authorization.Role;
 import com.omegarealm.core.database.Database;
 
 import java.sql.Connection;
@@ -144,6 +146,12 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
     }
 
     @Override
+    public LoadedPlayer loadPlayer(UUID playerUuid) throws PersistenceException {
+        Objects.requireNonNull(playerUuid, "playerUuid");
+        return transaction("player preparation", () -> selectLoadedPlayer(playerUuid));
+    }
+
+    @Override
     public Optional<PlayerProfile> findPlayer(UUID playerUuid) throws PersistenceException {
         Objects.requireNonNull(playerUuid, "playerUuid");
         return transaction("profile load", () -> selectPlayer(playerUuid));
@@ -169,12 +177,14 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
                     throw new PersistenceException(SESSION_CONFLICT, "Player persistence session token conflicts.");
                 }
 
-                PlayerProfile player = selectPlayer(start.playerUuid()).orElseThrow();
+                PlayerProfile player = selectLoadedPlayer(start.playerUuid()).storedProfile().orElseThrow();
                 if (!player.username().equals(start.username())) {
                     throw new PersistenceException(SESSION_CONFLICT, "Player persistence session metadata conflicts.");
                 }
                 return player;
             }
+
+            initializeNewPlayer(start);
 
             PlayerProfile player;
             try (PreparedStatement statement = prepare(connection, """
@@ -293,6 +303,60 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
             try (ResultSet result = statement.executeQuery()) {
                 return result.next() ? Optional.of(profile(result)) : Optional.empty();
             }
+        }
+    }
+
+    private LoadedPlayer selectLoadedPlayer(UUID playerUuid) throws SQLException {
+        try (PreparedStatement statement = prepare(connection, """
+                SELECT p.uuid, p.username, p.first_seen_at, p.last_seen_at, a.role, a.revision
+                FROM players p LEFT JOIN player_authorizations a ON a.player_uuid = p.uuid
+                WHERE p.uuid = ?
+                """)) {
+            statement.setObject(1, playerUuid);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    return new LoadedPlayer(Optional.empty(), AuthorizationSnapshot.initial(playerUuid));
+                }
+
+                String role = result.getString("role");
+                long revision = result.getLong("revision");
+                if (role == null || result.wasNull()) {
+                    throw new IllegalStateException("Existing player authorization is missing.");
+                }
+                AuthorizationSnapshot authorization = new AuthorizationSnapshot(playerUuid,
+                        Role.valueOf(role), revision);
+                return new LoadedPlayer(Optional.of(profile(result)), authorization);
+            }
+        }
+    }
+
+    private void initializeNewPlayer(SessionStart start) throws SQLException {
+        boolean inserted;
+        try (PreparedStatement statement = prepare(connection, """
+                INSERT INTO players (uuid, username, first_seen_at, last_seen_at)
+                VALUES (?, ?, ?, ?) ON CONFLICT (uuid) DO NOTHING RETURNING uuid
+                """)) {
+            statement.setObject(1, start.playerUuid());
+            statement.setString(2, start.username());
+            timestamp(statement, 3, start.joinedAt());
+            timestamp(statement, 4, start.joinedAt());
+            try (ResultSet result = statement.executeQuery()) {
+                inserted = result.next();
+            }
+        }
+
+        if (inserted) {
+            try (PreparedStatement statement = prepare(connection, """
+                    INSERT INTO player_authorizations (player_uuid, role, revision)
+                    VALUES (?, 'PLAYER', 0)
+                    """)) {
+                statement.setObject(1, start.playerUuid());
+                statement.executeUpdate();
+            }
+        } else {
+            // An existing identity with missing authority is corruption, not a new player.
+            // Never repair it silently or overwrite an elevated role on reconnect.
+            selectLoadedPlayer(start.playerUuid());
         }
     }
 

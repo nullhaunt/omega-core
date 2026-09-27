@@ -1,5 +1,7 @@
 package com.omegarealm.core.database;
 
+import com.omegarealm.core.authorization.AuthorizationSnapshot;
+import com.omegarealm.core.authorization.Role;
 import com.omegarealm.core.config.DatabaseConfig;
 import com.omegarealm.core.player.*;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
@@ -12,14 +14,13 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
+import java.sql.*;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.*;
@@ -107,16 +108,205 @@ class PlayerSessionRepositoryIntegrationTest {
                 PlayerSessionRepositoryIntegrationTest.class.getClassLoader(), location);
     }
 
+    private static void setAuthorization(DatabaseConfig config, UUID uuid, Role role, long revision) throws Exception {
+        // Fixture-only writes: no unrestricted role mutation API is exposed by the application.
+        try (Connection admin = admin(config); PreparedStatement statement = admin.prepareStatement(
+                "UPDATE player_authorizations SET role = ?, revision = ? WHERE player_uuid = ?")) {
+            statement.setString(1, role.name());
+            statement.setLong(2, revision);
+            statement.setObject(3, uuid);
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    @Test
+    void rolesPersistAcrossOwnersAndRestartWithoutReconnectResettingThem() throws Exception {
+        DatabaseConfig config = isolatedConfig(3);
+        SessionStart first = start("Player", JOINED);
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize();
+             var alpha = ready(database, "alpha"); var beta = ready(database, "beta")) {
+            assertEquals(AuthorizationSnapshot.initial(first.playerUuid()),
+                    alpha.loadPlayer(first.playerUuid()).authorization());
+            alpha.join(first);
+            alpha.endSession(first.sessionId(), JOINED.plusSeconds(1), SessionEnd.QUIT);
+
+            long revision = 1;
+            for (Role role : Role.values()) {
+                setAuthorization(config, first.playerUuid(), role, revision);
+                AuthorizationSnapshot expected = new AuthorizationSnapshot(first.playerUuid(), role, revision);
+                assertEquals(expected, alpha.loadPlayer(first.playerUuid()).authorization());
+                assertEquals(expected, beta.loadPlayer(first.playerUuid()).authorization());
+                revision++;
+            }
+
+            SessionStart returning = new SessionStart(UUID.randomUUID(), first.playerUuid(),
+                    "Renamed", JOINED.plusSeconds(2));
+            beta.join(returning);
+            beta.join(returning);
+            assertEquals(Role.OWNER, beta.loadPlayer(first.playerUuid()).authorization().role());
+            assertEquals(4, beta.loadPlayer(first.playerUuid()).authorization().revision());
+            beta.endSession(returning.sessionId(), JOINED.plusSeconds(3), SessionEnd.QUIT);
+            setAuthorization(config, first.playerUuid(), Role.PLAYER, 100);
+        }
+
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha")) {
+            LoadedPlayer loaded = repository.loadPlayer(first.playerUuid());
+            assertEquals("Renamed", loaded.storedProfile().orElseThrow().username());
+            assertEquals(new AuthorizationSnapshot(first.playerUuid(), Role.PLAYER, 100), loaded.authorization());
+        }
+    }
+
+    @Test
+    void authorizationMigrationBackfillsExistingPlayersWithoutChangingHistory() throws Exception {
+        Path previous = Files.createDirectory(directory.resolve("previous-" + UUID.randomUUID()));
+        for (String name : new String[]{"V001__create_players.sql", "V002__create_player_sessions.sql",
+                "V003__player_session_lifecycle.sql"}) {
+            try (var source = getClass().getResourceAsStream("/db/migration/" + name)) {
+                assertNotNull(source);
+                Files.copy(source, previous.resolve(name));
+            }
+        }
+        DatabaseConfig config = isolatedConfig(3);
+        UUID uuid = UUID.randomUUID();
+        try (Database database = bootstrap(config, "filesystem:" + previous).initialize();
+             Connection admin = admin(config); PreparedStatement statement = admin.prepareStatement("""
+                INSERT INTO players (uuid, username, first_seen_at, last_seen_at)
+                VALUES (?, 'Legacy', '2026-09-26T12:00:00Z', '2026-09-26T12:00:00Z')
+                """)) {
+            statement.setObject(1, uuid);
+            statement.executeUpdate();
+        }
+
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha"); Connection admin = admin(config)) {
+            LoadedPlayer loaded = repository.loadPlayer(uuid);
+            assertEquals(AuthorizationSnapshot.initial(uuid), loaded.authorization());
+            assertEquals(JOINED, loaded.storedProfile().orElseThrow().firstSeenAt());
+            assertEquals(JOINED, loaded.storedProfile().orElseThrow().lastSeenAt());
+            assertEquals(0, scalar(admin, "SELECT count(*) FROM player_sessions"));
+            assertEquals(4, scalar(admin, "SELECT count(*) FROM flyway_schema_history WHERE success"));
+        }
+    }
+
+    @Test
+    void authorizationSchemaRejectsUnknownRolesNegativeRevisionsDuplicatesAndOrphans() throws Exception {
+        DatabaseConfig config = isolatedConfig(3);
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha"); Connection admin = admin(config);
+             Statement statement = admin.createStatement()) {
+            SessionStart first = start("Player", JOINED);
+            repository.join(first);
+            assertEquals("23514", assertThrows(SQLException.class,
+                    () -> statement.executeUpdate("UPDATE player_authorizations SET role = 'INVALID'")).getSQLState());
+            assertEquals("23514", assertThrows(SQLException.class,
+                    () -> statement.executeUpdate("UPDATE player_authorizations SET revision = -1")).getSQLState());
+            assertEquals("23505", assertThrows(SQLException.class, () -> statement.executeUpdate("""
+                    INSERT INTO player_authorizations SELECT player_uuid, role, revision FROM player_authorizations
+                    """)).getSQLState());
+            assertEquals("23503", assertThrows(SQLException.class, () -> statement.executeUpdate("""
+                    INSERT INTO player_authorizations VALUES (gen_random_uuid(), 'ADMIN', 1)
+                    """)).getSQLState());
+            assertEquals(AuthorizationSnapshot.initial(first.playerUuid()),
+                    repository.loadPlayer(first.playerUuid()).authorization());
+        }
+    }
+
+    @Test
+    void preparationReadsAConsistentProfileAndAuthorizationView() throws Exception {
+        DatabaseConfig config = isolatedConfig(3);
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha"); Connection changing = admin(config)) {
+            SessionStart first = start("Original", JOINED);
+            repository.join(first);
+            changing.setAutoCommit(false);
+            try (Statement statement = changing.createStatement()) {
+                statement.executeUpdate("UPDATE players SET username = 'Changed'");
+                statement.executeUpdate("UPDATE player_authorizations SET role = 'ADMIN', revision = 9");
+            }
+
+            LoadedPlayer before = repository.loadPlayer(first.playerUuid());
+            assertEquals("Original", before.storedProfile().orElseThrow().username());
+            assertEquals(AuthorizationSnapshot.initial(first.playerUuid()), before.authorization());
+            changing.commit();
+            LoadedPlayer after = repository.loadPlayer(first.playerUuid());
+            assertEquals("Changed", after.storedProfile().orElseThrow().username());
+            assertEquals(new AuthorizationSnapshot(first.playerUuid(), Role.ADMIN, 9), after.authorization());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "invalid-role", "negative-revision"})
+    void corruptExistingAuthorizationFailsClosedWithoutDefaultingOrLeaking(String corruption) throws Exception {
+        DatabaseConfig config = isolatedConfig(3);
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha")) {
+            SessionStart first = start("Player", JOINED);
+            repository.join(first);
+            try (Connection admin = admin(config); Statement statement = admin.createStatement()) {
+                switch (corruption) {
+                    case "missing" -> statement.executeUpdate("DELETE FROM player_authorizations");
+                    case "invalid-role" -> {
+                        statement.execute("ALTER TABLE player_authorizations DROP CONSTRAINT player_authorization_role");
+                        statement.executeUpdate("UPDATE player_authorizations SET role = 'DO_NOT_LOG'");
+                    }
+                    case "negative-revision" -> {
+                        statement.execute("ALTER TABLE player_authorizations DROP CONSTRAINT player_authorization_revision");
+                        statement.executeUpdate("UPDATE player_authorizations SET revision = -1");
+                    }
+                    default -> throw new AssertionError();
+                }
+            }
+            PersistenceException failure = assertThrows(PersistenceException.class,
+                    () -> repository.loadPlayer(first.playerUuid()));
+            assertEquals(DATABASE_FAILURE, failure.kind());
+            assertFalse(failure.getMessage().contains("DO_NOT_LOG"));
+            assertNull(failure.getCause());
+            assertEquals(OWNERSHIP_LOST, assertThrows(PersistenceException.class, repository::checkOwnership).kind());
+        }
+    }
+
+    @Test
+    void authorizationInsertFailureRollsBackPlayerAndSessionTogether() throws Exception {
+        DatabaseConfig config = isolatedConfig(3);
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha")) {
+            try (Connection admin = admin(config); Statement statement = admin.createStatement()) {
+                statement.execute("""
+                        CREATE FUNCTION reject_authorization() RETURNS trigger LANGUAGE plpgsql AS $$
+                        BEGIN RAISE EXCEPTION 'DO_NOT_LOG_THIS_SECRET'; END $$
+                        """);
+                statement.execute("""
+                        CREATE TRIGGER reject_authorization BEFORE INSERT ON player_authorizations
+                        FOR EACH ROW EXECUTE FUNCTION reject_authorization()
+                        """);
+            }
+            PersistenceException failure = assertThrows(PersistenceException.class,
+                    () -> repository.join(start("Player", JOINED)));
+            assertFalse(failure.getMessage().contains("DO_NOT_LOG"));
+            assertNull(failure.getCause());
+            try (Connection admin = admin(config)) {
+                assertEquals(0, scalar(admin, "SELECT count(*) FROM players"));
+                assertEquals(0, scalar(admin, "SELECT count(*) FROM player_authorizations"));
+                assertEquals(0, scalar(admin, "SELECT count(*) FROM player_sessions"));
+            }
+        }
+    }
+
     @Test
     void preparationReadsDoNotCreatePlayersOrSessions() throws Exception {
         DatabaseConfig config = isolatedConfig(2);
         try (Database database = bootstrap(config, "classpath:db/migration").initialize();
              var repository = ready(database, "alpha")) {
-            assertTrue(repository.findPlayer(UUID.randomUUID()).isEmpty());
+            UUID newPlayer = UUID.randomUUID();
+            LoadedPlayer loaded = repository.loadPlayer(newPlayer);
+            assertTrue(loaded.storedProfile().isEmpty());
+            assertEquals(AuthorizationSnapshot.initial(newPlayer), loaded.authorization());
             assertTrue(repository.findSession(UUID.randomUUID()).isEmpty());
             try (Connection admin = admin(config)) {
                 assertEquals(0, scalar(admin, "SELECT count(*) FROM players"));
                 assertEquals(0, scalar(admin, "SELECT count(*) FROM player_sessions"));
+                assertEquals(0, scalar(admin, "SELECT count(*) FROM player_authorizations"));
             }
         }
     }
@@ -410,6 +600,7 @@ class PlayerSessionRepositoryIntegrationTest {
             assertNull(failure.getCause());
             try (Connection admin = admin(config)) {
                 assertEquals(0, scalar(admin, "SELECT count(*) FROM players"));
+                assertEquals(0, scalar(admin, "SELECT count(*) FROM player_authorizations"));
                 assertEquals(0, scalar(admin, "SELECT count(*) FROM player_sessions"));
             }
             assertEquals(OWNERSHIP_LOST, assertThrows(PersistenceException.class, repository::checkOwnership).kind());

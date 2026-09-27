@@ -1,5 +1,6 @@
 package com.omegarealm.core;
 
+import com.omegarealm.core.authorization.AuthorizationSnapshot;
 import com.omegarealm.core.config.DatabaseConfig;
 import com.omegarealm.core.config.OmegaConfig;
 import com.omegarealm.core.config.ServerConfig;
@@ -546,6 +547,11 @@ class OmegaRuntimeTest {
     }
 
     private static class TestRepository implements PlayerSessionRepository {
+
+        @Override
+        public LoadedPlayer loadPlayer(UUID uuid) {
+            return new LoadedPlayer(findPlayer(uuid), AuthorizationSnapshot.initial(uuid));
+        }
 
         @Override
         public Optional<PlayerProfile> findPlayer(UUID uuid) {
