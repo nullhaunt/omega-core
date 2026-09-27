@@ -1,6 +1,9 @@
 package com.omegarealm.core.player;
 
+import com.omegarealm.core.authorization.AuthorizationRefreshLimits;
 import com.omegarealm.core.authorization.AuthorizationSnapshot;
+import com.omegarealm.core.authorization.RoleChangeRequest;
+import com.omegarealm.core.authorization.RoleChangeResult;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -28,10 +31,12 @@ public final class PlayerService {
     private final Logger logger;
     private final Clock time;
     private final PlayerServiceLimits limits;
+    private final AuthorizationRefreshLimits authorizationLimits;
     private final Thread ioThread;
     private final Map<UUID, Entry> attempts = new HashMap<>();
     private final Map<UUID, Entry> currentPlayers = new HashMap<>();
     private final ArrayDeque<Work> mailbox = new ArrayDeque<>();
+    private final Set<RoleMutation> roleChanges = new HashSet<>();
     private State state = State.STARTING;
     private boolean pumpScheduled;
     private Work inFlight;
@@ -39,6 +44,8 @@ public final class PlayerService {
     private long ownershipCheckSequence;
     private ScheduledFuture<?> ownershipPoll;
     private ScheduledFuture<?> ownershipDeadline;
+    private ScheduledFuture<?> authorizationPoll;
+    private boolean authorizationRefreshPending;
     private Instant stoppedAt;
     private long cleanupDeadline;
     private boolean cleanlyClosed = true;
@@ -49,6 +56,13 @@ public final class PlayerService {
     public PlayerService(PlayerSessionRepository repository, Executor worker,
                          ScheduledExecutorService deadlines, Consumer<String> criticalFailure,
                          Logger logger, Clock time, PlayerServiceLimits limits) {
+        this(repository, worker, deadlines, criticalFailure, logger, time, limits, AuthorizationRefreshLimits.DEFAULT);
+    }
+
+    public PlayerService(PlayerSessionRepository repository, Executor worker,
+                         ScheduledExecutorService deadlines, Consumer<String> criticalFailure,
+                         Logger logger, Clock time, PlayerServiceLimits limits,
+                         AuthorizationRefreshLimits authorizationLimits) {
         this.repository = Objects.requireNonNull(repository, "repository");
         this.worker = Objects.requireNonNull(worker, "worker");
         this.deadlines = Objects.requireNonNull(deadlines, "deadlines");
@@ -56,6 +70,7 @@ public final class PlayerService {
         this.logger = Objects.requireNonNull(logger, "logger");
         this.time = Objects.requireNonNull(time, "time");
         this.limits = Objects.requireNonNull(limits, "limits");
+        this.authorizationLimits = Objects.requireNonNull(authorizationLimits, "authorizationLimits");
         ioThread = Thread.currentThread();
     }
 
@@ -80,6 +95,9 @@ public final class PlayerService {
             ownershipPoll = deadlines.scheduleWithFixedDelay(this::requestOwnershipCheck,
                     limits.ownershipInterval().toNanos(), limits.ownershipInterval().toNanos(),
                     TimeUnit.NANOSECONDS);
+            authorizationPoll = deadlines.scheduleWithFixedDelay(this::requestAuthorizationRefresh,
+                    authorizationLimits.interval().toNanos(), authorizationLimits.interval().toNanos(),
+                    TimeUnit.NANOSECONDS);
         }
         logger.info("Player service initialized: recovered " + recovered + " interrupted session(s).");
     }
@@ -96,7 +114,7 @@ public final class PlayerService {
     public boolean isPrepared(UUID token) {
         synchronized (ownership) {
             Entry entry = attempts.get(token);
-            return state == State.RUNNING && entry != null && entry.phase == Phase.PREPARED;
+            return state == State.RUNNING && entry != null && entry.phase == Phase.PREPARED && fresh(entry);
         }
     }
 
@@ -108,12 +126,57 @@ public final class PlayerService {
         Objects.requireNonNull(token, "token");
         synchronized (ownership) {
             Entry entry = attempts.get(token);
-            if (state != State.RUNNING || entry == null
+            if (state != State.RUNNING || entry == null || !fresh(entry)
                     || (entry.phase != Phase.PREPARED && entry.phase != Phase.JOINING && entry.phase != Phase.ACTIVE)) {
                 return Optional.empty();
             }
             return Optional.ofNullable(entry.authorization);
         }
+    }
+
+    /**
+     * Sticky expiration: a later read cannot restore authority to this connection.
+     */
+    public boolean requiresAuthorizationReconnect(UUID token) {
+        synchronized (ownership) {
+            Entry entry = attempts.get(token);
+            return state == State.RUNNING && entry != null && authorityPhase(entry) && !fresh(entry);
+        }
+    }
+
+    public CompletionStage<RoleChangeResult> changeRole(RoleChangeRequest request) {
+        Objects.requireNonNull(request, "request");
+        RoleMutation mutation = new RoleMutation(request);
+        try {
+            synchronized (ownership) {
+                if (state != State.RUNNING) {
+                    return rejected(Kind.UNAVAILABLE);
+                }
+                if (mailboxFull()) {
+                    return rejected(Kind.BUSY);
+                }
+                mutation.deadline = deadlines.schedule(() -> failService(
+                                "Role change exceeded its deadline; inspect audit history before retrying.",
+                                () -> roleChanges.contains(mutation)),
+                        limits.mutationTimeout().toNanos(), TimeUnit.NANOSECONDS);
+                roleChanges.add(mutation);
+                mailbox.addLast(new Work(null, Operation.ROLE_CHANGE, mutation));
+            }
+        } catch (RejectedExecutionException unavailableClock) {
+            failService("Player deadline clock is unavailable.");
+            return rejected(Kind.UNAVAILABLE);
+        }
+        kick();
+        return mutation.result.minimalCompletionStage();
+    }
+
+    private boolean authorityPhase(Entry entry) {
+        return entry.phase == Phase.PREPARED || entry.phase == Phase.JOINING || entry.phase == Phase.ACTIVE;
+    }
+
+    private boolean fresh(Entry entry) {
+        return entry.authorization != null && !entry.authorizationExpired
+                && System.nanoTime() - entry.authorizationVerifiedAt < authorizationLimits.freshness().toNanos();
     }
 
     public CompletionStage<PreparedPlayer> prepare(PlayerAttempt attempt) {
@@ -274,6 +337,7 @@ public final class PlayerService {
             pending = new ArrayList<>(attempts.values());
         }
         rejectPending(pending);
+        rejectRoleChanges();
     }
 
     /**
@@ -347,7 +411,8 @@ public final class PlayerService {
 
     private void kick() {
         synchronized (ownership) {
-            if (state != State.RUNNING || pumpScheduled || (mailbox.isEmpty() && !ownershipCheckPending)) {
+            if (state != State.RUNNING || pumpScheduled
+                    || (mailbox.isEmpty() && !ownershipCheckPending && !authorizationRefreshPending)) {
                 return;
             }
             pumpScheduled = true;
@@ -364,14 +429,19 @@ public final class PlayerService {
         while (true) {
             Work work;
             boolean checkOwner;
+            boolean refreshAuthority;
             synchronized (ownership) {
                 if (state != State.RUNNING) {
                     pumpScheduled = false;
                     return;
                 }
                 checkOwner = ownershipCheckPending;
-                work = checkOwner ? null : mailbox.pollFirst();
-                if (!checkOwner && work == null) {
+                refreshAuthority = !checkOwner && authorizationRefreshPending;
+                if (refreshAuthority) {
+                    authorizationRefreshPending = false;
+                }
+                work = checkOwner || refreshAuthority ? null : mailbox.pollFirst();
+                if (!checkOwner && !refreshAuthority && work == null) {
                     pumpScheduled = false;
                     return;
                 }
@@ -386,11 +456,14 @@ public final class PlayerService {
                         cancel(ownershipDeadline);
                         ownershipDeadline = null;
                     }
+                } else if (refreshAuthority) {
+                    refreshAuthorizations();
                 } else {
                     switch (work.operation()) {
                         case LOAD -> load(work.entry());
                         case JOIN -> join(work.entry());
                         case QUIT -> quit(work.entry());
+                        case ROLE_CHANGE -> changeRoleOnWorker(work.mutation());
                     }
                 }
             } catch (PersistenceException failure) {
@@ -411,19 +484,32 @@ public final class PlayerService {
                 return;
             }
         }
+        long verifiedAt = System.nanoTime();
         LoadedPlayer loaded = repository.loadPlayer(entry.attempt.identity().uuid());
         PreparedPlayer prepared = new PreparedPlayer(entry.attempt, loaded.storedProfile(), loaded.authorization());
+        boolean expired;
         synchronized (ownership) {
             if (state != State.RUNNING || entry.phase != Phase.LOADING) {
                 return;
             }
             cancel(entry.deadline);
-            entry.authorization = prepared.authorization();
-            entry.phase = Phase.PREPARED;
-            entry.deadline = deadlines.schedule(() -> expire(entry, Phase.PREPARED),
-                    limits.preparedTimeout().toNanos(), TimeUnit.NANOSECONDS);
+            expired = System.nanoTime() - verifiedAt >= authorizationLimits.freshness().toNanos();
+            if (expired) {
+                invalidate(entry);
+            } else {
+                entry.authorization = prepared.authorization();
+                entry.persisted = loaded.storedProfile().isPresent();
+                entry.phase = Phase.PREPARED;
+                renewAuthorization(entry, verifiedAt);
+                entry.deadline = deadlines.schedule(() -> expire(entry, Phase.PREPARED),
+                        limits.preparedTimeout().toNanos(), TimeUnit.NANOSECONDS);
+            }
         }
-        entry.preparation.complete(prepared);
+        if (expired) {
+            entry.preparation.completeExceptionally(new PlayerOperationException(Kind.TIMED_OUT));
+        } else {
+            entry.preparation.complete(prepared);
+        }
     }
 
     private void join(Entry entry) throws PersistenceException {
@@ -431,6 +517,7 @@ public final class PlayerService {
         boolean publish;
         synchronized (ownership) {
             entry.committed = true;
+            entry.persisted = true;
             publish = state == State.RUNNING && entry.phase == Phase.JOINING;
             if (publish) {
                 entry.phase = Phase.ACTIVE;
@@ -488,9 +575,141 @@ public final class PlayerService {
 
     private void remove(Entry entry) {
         entry.authorization = null;
+        cancel(entry.authorizationDeadline);
         cancel(entry.deadline);
         attempts.remove(entry.attempt.token(), entry);
         currentPlayers.remove(entry.attempt.identity().uuid(), entry);
+    }
+
+    private void requestAuthorizationRefresh() {
+        synchronized (ownership) {
+            if (state != State.RUNNING) {
+                return;
+            }
+            authorizationRefreshPending = true;
+        }
+        kick();
+    }
+
+    private void refreshAuthorizations() throws PersistenceException {
+        List<Entry> connected;
+        synchronized (ownership) {
+            connected = attempts.values().stream().filter(entry -> authorityPhase(entry) && fresh(entry)).toList();
+        }
+        for (int offset = 0; offset < connected.size(); offset += authorizationLimits.batchSize()) {
+            List<Entry> batch;
+            synchronized (ownership) {
+                if (state != State.RUNNING) {
+                    return;
+                }
+                // Earlier batches can be delayed while these attempts quit or expire.
+                // Claim only the still-current entries before issuing another read.
+                batch = connected.subList(offset, Math.min(connected.size(), offset + authorizationLimits.batchSize()))
+                        .stream().filter(entry -> attempts.get(entry.attempt.token()) == entry
+                                && authorityPhase(entry) && fresh(entry)).toList();
+            }
+            if (batch.isEmpty()) {
+                continue;
+            }
+            long verifiedAt = System.nanoTime();
+            Map<UUID, AuthorizationSnapshot> loaded = repository.loadAuthorizations(
+                    batch.stream().map(entry -> entry.attempt.identity().uuid()).toList());
+            synchronized (ownership) {
+                if (state != State.RUNNING) {
+                    return;
+                }
+                for (Entry entry : batch) {
+                    if (attempts.get(entry.attempt.token()) != entry || !authorityPhase(entry) || !fresh(entry)) {
+                        continue;
+                    }
+                    AuthorizationSnapshot snapshot = loaded.get(entry.attempt.identity().uuid());
+                    if (snapshot == null) {
+                        if (entry.persisted) {
+                            throw new IllegalStateException("Existing player authority disappeared during refresh.");
+                        }
+                        snapshot = AuthorizationSnapshot.initial(entry.attempt.identity().uuid());
+                    }
+                    publishAuthorization(entry, snapshot, verifiedAt);
+                }
+            }
+        }
+    }
+
+    /**
+     * Caller holds ownership; the watermark predates the database observation.
+     */
+    private void publishAuthorization(Entry entry, AuthorizationSnapshot snapshot, long verifiedAt) {
+        AuthorizationSnapshot previous = entry.authorization;
+        if (!snapshot.playerUuid().equals(entry.attempt.identity().uuid())
+                || snapshot.revision() < previous.revision()
+                || (snapshot.revision() == previous.revision() && snapshot.role() != previous.role())) {
+            throw new IllegalStateException("Authorization revision or identity conflicts.");
+        }
+        if (System.nanoTime() - verifiedAt < authorizationLimits.freshness().toNanos()) {
+            entry.authorization = snapshot;
+            renewAuthorization(entry, verifiedAt);
+        }
+    }
+
+    private void renewAuthorization(Entry entry, long verifiedAt) {
+        cancel(entry.authorizationDeadline);
+        entry.authorizationVerifiedAt = verifiedAt;
+        long sequence = ++entry.authorizationSequence;
+        long remaining = authorizationLimits.freshness().toNanos() - (System.nanoTime() - verifiedAt);
+        entry.authorizationDeadline = deadlines.schedule(() -> expireAuthorization(entry, sequence),
+                Math.max(0, remaining), TimeUnit.NANOSECONDS);
+    }
+
+    private void expireAuthorization(Entry entry, long sequence) {
+        synchronized (ownership) {
+            if (state != State.RUNNING || attempts.get(entry.attempt.token()) != entry
+                    || !authorityPhase(entry) || entry.authorizationSequence != sequence || entry.authorizationExpired) {
+                return;
+            }
+            entry.authorizationExpired = true;
+            entry.authorization = null;
+        }
+        logger.warning("Authorization freshness expired: connection=" + entry.attempt.token() + "; reconnect required.");
+    }
+
+    private void changeRoleOnWorker(RoleMutation mutation) throws PersistenceException {
+        Entry target;
+        synchronized (ownership) {
+            target = currentPlayers.get(mutation.request.targetUuid());
+        }
+        long verifiedAt = System.nanoTime();
+        RoleChangeResult result = repository.changeRole(mutation.request);
+        boolean publish;
+        synchronized (ownership) {
+            publish = state == State.RUNNING;
+            if (publish && result.authorization() != null && target != null
+                    && attempts.get(target.attempt.token()) == target && authorityPhase(target) && fresh(target)) {
+                publishAuthorization(target, result.authorization(), verifiedAt);
+            }
+            roleChanges.remove(mutation);
+            cancel(mutation.deadline);
+        }
+        if (result.status() == RoleChangeResult.Status.CHANGED) {
+            logger.info("Role change committed: audit=" + result.auditId() + ", target="
+                    + result.authorization().playerUuid() + ", role=" + result.authorization().role().name()
+                    + ", revision=" + result.authorization().revision() + ".");
+        }
+        if (publish) {
+            mutation.result.complete(result);
+        } else {
+            mutation.result.completeExceptionally(new PlayerOperationException(Kind.UNAVAILABLE));
+        }
+    }
+
+    private void rejectRoleChanges() {
+        List<RoleMutation> pending;
+        synchronized (ownership) {
+            pending = List.copyOf(roleChanges);
+            roleChanges.clear();
+        }
+        for (RoleMutation mutation : pending) {
+            mutation.result.completeExceptionally(new PlayerOperationException(Kind.UNAVAILABLE));
+        }
     }
 
     private void requestOwnershipCheck() {
@@ -540,16 +759,23 @@ public final class PlayerService {
             criticalFailure.accept(message);
         } finally {
             rejectPending(pending);
+            rejectRoleChanges();
         }
     }
 
     private void stopTimers() {
         cancel(ownershipPoll);
         cancel(ownershipDeadline);
+        cancel(authorizationPoll);
+        authorizationRefreshPending = false;
         ownershipCheckPending = false;
         for (Entry entry : attempts.values()) {
             entry.authorization = null;
             cancel(entry.deadline);
+            cancel(entry.authorizationDeadline);
+        }
+        for (RoleMutation mutation : roleChanges) {
+            cancel(mutation.deadline);
         }
     }
 
@@ -577,10 +803,23 @@ public final class PlayerService {
     }
 
     private enum Operation {
-        LOAD, JOIN, QUIT
+        LOAD, JOIN, QUIT, ROLE_CHANGE
     }
 
-    private record Work(Entry entry, Operation operation) {
+    private record Work(Entry entry, Operation operation, RoleMutation mutation) {
+        private Work(Entry entry, Operation operation) {
+            this(entry, operation, null);
+        }
+    }
+
+    private static final class RoleMutation {
+        private final RoleChangeRequest request;
+        private final CompletableFuture<RoleChangeResult> result = new CompletableFuture<>();
+        private ScheduledFuture<?> deadline;
+
+        private RoleMutation(RoleChangeRequest request) {
+            this.request = request;
+        }
     }
 
     private static final class Entry {
@@ -590,6 +829,11 @@ public final class PlayerService {
         private final CompletableFuture<Void> departure = new CompletableFuture<>();
         private Phase phase = Phase.LOADING;
         private AuthorizationSnapshot authorization;
+        private boolean authorizationExpired;
+        private boolean persisted;
+        private long authorizationVerifiedAt;
+        private long authorizationSequence;
+        private ScheduledFuture<?> authorizationDeadline;
         private ScheduledFuture<?> deadline;
         private Instant joinedAt;
         private Instant leftAt;

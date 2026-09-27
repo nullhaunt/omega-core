@@ -1,6 +1,12 @@
 package com.omegarealm.core.player;
 
+import com.omegarealm.core.authorization.AuthorizationSnapshot;
+import com.omegarealm.core.authorization.RoleChangeRequest;
+import com.omegarealm.core.authorization.RoleChangeResult;
+
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -14,6 +20,16 @@ public interface PlayerSessionRepository extends AutoCloseable {
      * Loads profile and authorization consistently; does not create either record.
      */
     LoadedPlayer loadPlayer(UUID playerUuid) throws PersistenceException;
+
+    /**
+     * Reads up to 64 identities in one statement; missing rows are not substituted.
+     */
+    Map<UUID, AuthorizationSnapshot> loadAuthorizations(List<UUID> playerUuids) throws PersistenceException;
+
+    /**
+     * Rechecks authoritative actor/target roles and records changes atomically.
+     */
+    RoleChangeResult changeRole(RoleChangeRequest request) throws PersistenceException;
 
     Optional<PlayerProfile> findPlayer(UUID playerUuid) throws PersistenceException;
 

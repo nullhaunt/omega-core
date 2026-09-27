@@ -1,7 +1,6 @@
 package com.omegarealm.core.database;
 
-import com.omegarealm.core.authorization.AuthorizationSnapshot;
-import com.omegarealm.core.authorization.Role;
+import com.omegarealm.core.authorization.*;
 import com.omegarealm.core.config.DatabaseConfig;
 import com.omegarealm.core.player.*;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
@@ -22,6 +21,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.*;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
@@ -82,6 +82,10 @@ class PlayerSessionRepositoryIntegrationTest {
         return bootstrap(isolatedConfig(3), "classpath:db/migration").initialize();
     }
 
+    private static RoleChangeRequest consoleChange(UUID uuid, Role role) {
+        return new RoleChangeRequest(new AuthorizationActor.LocalConsole(), uuid, role, "Staff appointment");
+    }
+
     private static DatabaseConfig isolatedConfig(int poolSize) throws Exception {
         String name = "omega_player_test_" + UUID.randomUUID().toString().replace("-", "");
         try (Connection connection = postgres.getPostgresDatabase().getConnection(); Statement statement = connection.createStatement()) {
@@ -116,6 +120,134 @@ class PlayerSessionRepositoryIntegrationTest {
             statement.setLong(2, revision);
             statement.setObject(3, uuid);
             assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    @Test
+    void roleChangeCommitsAuditAndRealmWideRevisionWhileNoOpDoesNotWrite() throws Exception {
+        try (Database database = database();
+             var alpha = ready(database, "alpha"); var beta = ready(database, "beta");
+             Connection admin = database.openConnection()) {
+            SessionStart target = start("Target", JOINED);
+            alpha.join(target);
+            alpha.endSession(target.sessionId(), JOINED.plusSeconds(1), SessionEnd.QUIT);
+            var changed = alpha.changeRole(consoleChange(target.playerUuid(), Role.OWNER));
+            assertEquals(RoleChangeResult.Status.CHANGED, changed.status());
+            assertEquals(1, changed.authorization().revision());
+            assertEquals(changed.authorization(), beta.loadAuthorizations(List.of(target.playerUuid())).get(target.playerUuid()));
+            try (PreparedStatement query = admin.prepareStatement("SELECT * FROM role_change_audit WHERE id = ?")) {
+                query.setObject(1, changed.auditId());
+                try (ResultSet row = query.executeQuery()) {
+                    assertTrue(row.next());
+                    assertEquals("alpha", row.getString("server_id"));
+                    assertEquals("LOCAL_CONSOLE", row.getString("actor_kind"));
+                    assertNull(row.getObject("actor_uuid"));
+                    assertEquals("PLAYER", row.getString("previous_role"));
+                    assertEquals("OWNER", row.getString("new_role"));
+                    assertEquals(0, row.getLong("previous_revision"));
+                    assertEquals(1, row.getLong("new_revision"));
+                    assertEquals("Staff appointment", row.getString("reason"));
+                    assertNotNull(row.getObject("changed_at"));
+                    assertFalse(row.next());
+                }
+            }
+            var unchanged = alpha.changeRole(consoleChange(target.playerUuid(), Role.OWNER));
+            assertEquals(RoleChangeResult.Status.UNCHANGED, unchanged.status());
+            assertEquals(1, unchanged.authorization().revision());
+            assertNull(unchanged.auditId());
+            assertEquals(RoleChangeResult.Status.NOT_FOUND,
+                    alpha.changeRole(consoleChange(UUID.randomUUID(), Role.ADMIN)).status());
+            assertEquals(RoleChangeResult.Status.DENIED, alpha.changeRole(new RoleChangeRequest(
+                    new AuthorizationActor.Untrusted(), target.playerUuid(), Role.PLAYER, "Denied request")).status());
+            assertEquals(1, scalar(admin, "SELECT count(*) FROM role_change_audit"));
+        }
+    }
+
+    @Test
+    void roleWriterRechecksStoredActorAuthorityAndProtectsPeers() throws Exception {
+        try (Database database = database(); var repository = ready(database, "alpha");
+             Connection admin = database.openConnection()) {
+            SessionStart actor = start("Actor", JOINED);
+            SessionStart target = start("Target", JOINED);
+            repository.join(actor);
+            repository.join(target);
+            var forgedOwner = new AuthorizationActor.Player(actor.playerUuid(), Role.OWNER);
+            assertEquals(RoleChangeResult.Status.DENIED, repository.changeRole(new RoleChangeRequest(
+                    forgedOwner, target.playerUuid(), Role.ADMIN, "Forged authority")).status());
+            repository.changeRole(consoleChange(actor.playerUuid(), Role.ADMIN));
+            var claimedPlayer = new AuthorizationActor.Player(actor.playerUuid(), Role.PLAYER);
+            var promotion = repository.changeRole(new RoleChangeRequest(
+                    claimedPlayer, target.playerUuid(), Role.MODERATOR, "Moderator appointment"));
+            assertEquals(RoleChangeResult.Status.CHANGED, promotion.status());
+            assertEquals(1, scalar(admin, "SELECT count(*) FROM role_change_audit WHERE actor_role='ADMIN' AND actor_kind='PLAYER'"));
+            repository.changeRole(consoleChange(target.playerUuid(), Role.ADMIN));
+            assertEquals(RoleChangeResult.Status.DENIED, repository.changeRole(new RoleChangeRequest(
+                    forgedOwner, target.playerUuid(), Role.PLAYER, "Peer demotion")).status());
+            assertEquals(RoleChangeResult.Status.DENIED, repository.changeRole(new RoleChangeRequest(
+                    forgedOwner, actor.playerUuid(), Role.PLAYER, "Self demotion")).status());
+            assertEquals(3, scalar(admin, "SELECT count(*) FROM role_change_audit"));
+        }
+    }
+
+    @Test
+    void failedAuditInsertionRollsBackAuthorityAndDoesNotLeakReason() throws Exception {
+        try (Database database = database(); var repository = ready(database, "alpha");
+             Connection admin = database.openConnection(); Statement sql = admin.createStatement()) {
+            SessionStart target = start("Target", JOINED);
+            repository.join(target);
+            sql.execute("ALTER TABLE role_change_audit ADD CONSTRAINT reject_audit CHECK (false) NOT VALID");
+            PersistenceException failure = assertThrows(PersistenceException.class, () -> repository.changeRole(
+                    new RoleChangeRequest(new AuthorizationActor.LocalConsole(), target.playerUuid(), Role.ADMIN, "DO_NOT_LOG_REASON")));
+            assertEquals(DATABASE_FAILURE, failure.kind());
+            assertFalse(failure.getMessage().contains("DO_NOT_LOG"));
+            assertNull(failure.getCause());
+            assertEquals(1, scalar(admin, "SELECT count(*) FROM player_authorizations WHERE role='PLAYER' AND revision=0"));
+            assertEquals(0, scalar(admin, "SELECT count(*) FROM role_change_audit"));
+        }
+    }
+
+    @Test
+    void concurrentServersSerializeRoleChangesWithoutLosingAuditOrRevision() throws Exception {
+        try (Database database = database()) {
+            UUID target;
+            try (var seed = ready(database, "seed")) {
+                SessionStart start = start("Target", JOINED);
+                seed.join(start);
+                seed.endSession(start.sessionId(), JOINED.plusSeconds(1), SessionEnd.QUIT);
+                target = start.playerUuid();
+            }
+            ExecutorService writers = Executors.newFixedThreadPool(2);
+            CountDownLatch acquired = new CountDownLatch(2);
+            CountDownLatch release = new CountDownLatch(1);
+            try {
+                Future<RoleChangeResult> first = writers.submit(() -> {
+                    try (var repository = ready(database, "alpha")) {
+                        acquired.countDown();
+                        assertTrue(release.await(5, TimeUnit.SECONDS));
+                        return repository.changeRole(consoleChange(target, Role.MODERATOR));
+                    }
+                });
+                Future<RoleChangeResult> second = writers.submit(() -> {
+                    try (var repository = ready(database, "beta")) {
+                        acquired.countDown();
+                        assertTrue(release.await(5, TimeUnit.SECONDS));
+                        return repository.changeRole(consoleChange(target, Role.ADMIN));
+                    }
+                });
+                assertTrue(acquired.await(5, TimeUnit.SECONDS));
+                release.countDown();
+                assertEquals(RoleChangeResult.Status.CHANGED, first.get(10, TimeUnit.SECONDS).status());
+                assertEquals(RoleChangeResult.Status.CHANGED, second.get(10, TimeUnit.SECONDS).status());
+                try (Connection admin = database.openConnection()) {
+                    assertEquals(2, scalar(admin, "SELECT revision FROM player_authorizations"));
+                    assertEquals(2, scalar(admin, "SELECT count(*) FROM role_change_audit"));
+                    assertEquals(3, scalar(admin, "SELECT sum(new_revision) FROM role_change_audit"));
+                }
+            } finally {
+                release.countDown();
+                writers.shutdownNow();
+                assertTrue(writers.awaitTermination(10, TimeUnit.SECONDS));
+            }
         }
     }
 
@@ -185,7 +317,7 @@ class PlayerSessionRepositoryIntegrationTest {
             assertEquals(JOINED, loaded.storedProfile().orElseThrow().firstSeenAt());
             assertEquals(JOINED, loaded.storedProfile().orElseThrow().lastSeenAt());
             assertEquals(0, scalar(admin, "SELECT count(*) FROM player_sessions"));
-            assertEquals(4, scalar(admin, "SELECT count(*) FROM flyway_schema_history WHERE success"));
+            assertEquals(5, scalar(admin, "SELECT count(*) FROM flyway_schema_history WHERE success"));
         }
     }
 

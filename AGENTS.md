@@ -107,6 +107,16 @@ unrequested systems. Creating this file does not authorize the next implementati
   mismatch. Do not automatically baseline, repair, clean, or adopt an unmanaged nonempty schema.
 - UUID is authoritative player identity. Usernames are mutable metadata. Session
   uniqueness and recovery need an explicit join/reconnect contract before implementation.
+- Role changes require a reason and a durable audit in the same transaction. Recheck stored
+  actor/target roles under locks acquired in UUID order; never trust a supplied role snapshot.
+  The initial command is local-console-only and targets persisted UUIDs, including offline
+  players. RCON, command blocks, players and delegated execution do not acquire console authority.
+- Authorization polling uses the existing ordered worker and deadline clock: one-second
+  interval, batches of at most 64, two-second refresh-query timeout and five-second freshness
+  measured from before the database read. Access denies on expiry even if the timer is late.
+  Expiry is terminal for the connection; late reads and reconnects cannot restore old authority.
+  Schedule forced reconnect on the exact player's entity context. General Minecraft permission
+  enforcement remains a separate gate; do not claim loaded/refreshed roles implement it.
 
 ## Code quality
 
@@ -165,7 +175,24 @@ $env:JAVA_HOME = 'D:\Dev\.jdks\ms-25.0.4.1'
   what was verified, and remaining limits. Separate unit, database, Paper, Folia, and
   production-load evidence; never imply that one proves the others.
 
-## Handoff snapshot — 2026-09-26
+## Current handoff — 2026-09-27
+
+Player/session persistence, connection preparation, ordered worker ownership, scheduler
+integration, role policy and realm-wide role loading are implemented. Console role changes
+now use V005 audit history and atomic authoritative checks; connected snapshots refresh in
+bounded batches and expire after five seconds. Physical reconnect runs on the exact player's
+entity scheduler. No new resource owners or configuration keys were added.
+
+Java 25 build passed with 250 unit tests and 51 native PostgreSQL tests. The native suite
+includes concurrent role writers, audit rollback and propagation between two runtime/server
+IDs. Disposable Paper 26.3 build 42 verified console and namespaced changes, OP player denial,
+local publication, no-op behavior, expiry during a worker stall, exact session closure and
+clean shutdown. Live deployment, production load and Folia were not verified. General vanilla
+permission enforcement, OP control and player-facing role commands remain subsequent gates.
+
+The earlier snapshot below records bootstrap evidence only; it is not current feature status.
+
+## Earlier handoff snapshot — 2026-09-26
 
 Completed: strict immutable configuration, asynchronous PostgreSQL bootstrap, Hikari
 ownership, Flyway migrations and validation, startup deadlines, readiness admission,

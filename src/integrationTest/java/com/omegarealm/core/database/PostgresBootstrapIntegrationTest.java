@@ -89,7 +89,7 @@ class PostgresBootstrapIntegrationTest {
         PostgresBootstrap bootstrap = bootstrap(config, "classpath:db/migration");
 
         try (Database database = bootstrap.initialize(); Connection connection = database.openConnection()) {
-            assertEquals(4, scalar(connection, "SELECT count(*) FROM flyway_schema_history WHERE success"));
+            assertEquals(5, scalar(connection, "SELECT count(*) FROM flyway_schema_history WHERE success"));
             assertEquals(2, scalar(connection, "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('players','player_sessions')"));
             try (Statement statement = connection.createStatement()) {
                 statement.executeUpdate("INSERT INTO players(uuid,username,first_seen_at,last_seen_at) VALUES ('00000000-0000-0000-0000-000000000001','TestPlayer',now(),now())");
@@ -97,7 +97,7 @@ class PostgresBootstrapIntegrationTest {
         }
 
         try (Database database = bootstrap.initialize(); Connection connection = database.openConnection()) {
-            assertEquals(4, scalar(connection, "SELECT count(*) FROM flyway_schema_history WHERE success"));
+            assertEquals(5, scalar(connection, "SELECT count(*) FROM flyway_schema_history WHERE success"));
             assertEquals(1, scalar(connection, "SELECT count(*) FROM players"));
             assertTrue(messages.stream().anyMatch(message -> message.contains("applied 0 migration(s)")));
         }

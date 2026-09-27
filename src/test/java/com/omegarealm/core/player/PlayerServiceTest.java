@@ -1,8 +1,6 @@
 package com.omegarealm.core.player;
 
-import com.omegarealm.core.authorization.AuthorizationSnapshot;
-import com.omegarealm.core.authorization.Role;
-
+import com.omegarealm.core.authorization.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -11,6 +9,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.*;
@@ -71,6 +70,10 @@ class PlayerServiceTest {
             Thread.sleep(5);
         }
         assertTrue(condition.getAsBoolean());
+    }
+
+    private static AuthorizationRefreshLimits refreshLimits() {
+        return new AuthorizationRefreshLimits(Duration.ofMillis(40), Duration.ofMillis(300), 2);
     }
 
     @Test
@@ -659,6 +662,216 @@ class PlayerServiceTest {
         }
     }
 
+    @Test
+    void refreshBatchesConnectedPlayersAndPublishesHigherRevisions() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        List<Integer> sizes = new CopyOnWriteArrayList<>();
+        repository.authorizationBatch = uuids -> {
+            sizes.add(uuids.size());
+            return uuids.stream().collect(java.util.stream.Collectors.toMap(uuid -> uuid,
+                    uuid -> new AuthorizationSnapshot(uuid, Role.ADMIN, 1)));
+        };
+        try (Harness harness = new Harness(repository, LIMITS, null, refreshLimits())) {
+            List<PlayerAttempt> connected = List.of(attempt(), attempt(), attempt(), attempt(), attempt());
+            for (PlayerAttempt player : connected) {
+                await(harness.service.prepare(player));
+            }
+            waitUntil(() -> connected.stream().allMatch(player -> harness.service.authorization(player.token())
+                    .map(snapshot -> snapshot.role() == Role.ADMIN && snapshot.revision() == 1).orElse(false)));
+            assertTrue(sizes.size() >= 3);
+            assertTrue(sizes.stream().allMatch(size -> size <= 2));
+            assertTrue(harness.failures.isEmpty());
+        }
+    }
+
+    @Test
+    void delayedRefreshExpiresAuthorityAndCannotReviveItAfterCompletion() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        repository.authorizationBatch = uuids -> {
+            entered.countDown();
+            waitFor(release);
+            return uuids.stream().collect(java.util.stream.Collectors.toMap(uuid -> uuid,
+                    uuid -> new AuthorizationSnapshot(uuid, Role.OWNER, 1)));
+        };
+        try (Harness harness = new Harness(repository, LIMITS, null, refreshLimits())) {
+            PlayerAttempt player = attempt();
+            await(harness.service.prepare(player));
+            await(harness.service.activate(player.token(), JOINED));
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                waitUntil(() -> harness.service.requiresAuthorizationReconnect(player.token()));
+                assertTrue(harness.service.authorization(player.token()).isEmpty());
+            } finally {
+                release.countDown();
+            }
+            harness.barrier();
+            assertTrue(harness.service.authorization(player.token()).isEmpty());
+            assertTrue(harness.service.requiresAuthorizationReconnect(player.token()));
+            assertTrue(harness.service.isRunning());
+            assertTrue(harness.failures.isEmpty());
+        }
+    }
+
+    @Test
+    void remainingBatchesDoNotReadPlayersWhoDisconnectedDuringAnEarlierBatch() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<UUID> first = new java.util.concurrent.atomic.AtomicReference<>();
+        AtomicInteger calls = new AtomicInteger();
+        repository.authorizationBatch = uuids -> {
+            calls.incrementAndGet();
+            first.set(uuids.getFirst());
+            entered.countDown();
+            waitFor(release);
+            return Map.of(uuids.getFirst(), AuthorizationSnapshot.initial(uuids.getFirst()));
+        };
+        var refresh = new AuthorizationRefreshLimits(Duration.ofMillis(200), Duration.ofSeconds(2), 1);
+        try (Harness harness = new Harness(repository, LIMITS, null, refresh)) {
+            List<PlayerAttempt> connected = List.of(attempt(), attempt(), attempt());
+            for (PlayerAttempt player : connected) {
+                await(harness.service.prepare(player));
+            }
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                for (PlayerAttempt player : connected) {
+                    if (!player.identity().uuid().equals(first.get())) {
+                        await(harness.service.disconnect(player.token(), JOINED.plusSeconds(1)));
+                    }
+                }
+            } finally {
+                release.countDown();
+            }
+            harness.barrier();
+            assertEquals(1, calls.get());
+            assertTrue(harness.failures.isEmpty());
+        }
+    }
+
+    @Test
+    void refreshForDepartedTokenCannotOverwriteReconnect() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        repository.read = uuid -> Optional.of(new PlayerProfile(uuid, "Player", JOINED, JOINED));
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger batches = new AtomicInteger();
+        repository.authorizationBatch = uuids -> {
+            if (batches.incrementAndGet() == 1) {
+                entered.countDown();
+                waitFor(release);
+                return uuids.stream().collect(java.util.stream.Collectors.toMap(uuid -> uuid,
+                        uuid -> new AuthorizationSnapshot(uuid, Role.OWNER, 1)));
+            }
+            return uuids.stream().collect(java.util.stream.Collectors.toMap(uuid -> uuid, repository.authorization));
+        };
+        try (Harness harness = new Harness(repository, LIMITS, null, refreshLimits())) {
+            PlayerAttempt old = attempt();
+            await(harness.service.prepare(old));
+            await(harness.service.activate(old.token(), JOINED));
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            CompletionStage<Void> departure;
+            CompletionStage<PreparedPlayer> preparation;
+            PlayerAttempt next = new PlayerAttempt(UUID.randomUUID(), old.identity());
+            try {
+                departure = harness.service.disconnect(old.token(), JOINED.plusSeconds(1));
+                repository.authorization = uuid -> new AuthorizationSnapshot(uuid, Role.PLAYER, 2);
+                preparation = harness.service.prepare(next);
+            } finally {
+                release.countDown();
+            }
+            await(departure);
+            assertEquals(2, await(preparation).authorization().revision());
+            assertTrue(harness.service.authorization(old.token()).isEmpty());
+            assertEquals(Role.PLAYER, harness.service.authorization(next.token()).orElseThrow().role());
+            assertTrue(harness.failures.isEmpty());
+        }
+    }
+
+    @Test
+    void roleChangePublishesCommittedAuthorityBeforeReportingSuccess() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        repository.roleMutation = request -> {
+            repository.authorization = uuid -> new AuthorizationSnapshot(uuid, request.role(), 1);
+            return new RoleChangeResult(RoleChangeResult.Status.CHANGED,
+                    repository.authorization.apply(request.targetUuid()), UUID.randomUUID());
+        };
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            PlayerAttempt player = attempt();
+            await(harness.service.prepare(player));
+            RoleChangeResult result = await(harness.service.changeRole(new RoleChangeRequest(
+                    new AuthorizationActor.LocalConsole(), player.identity().uuid(), Role.ADMIN, "Staff appointment")));
+            assertEquals(result.authorization(), harness.service.authorization(player.token()).orElseThrow());
+            assertNotNull(result.auditId());
+        }
+    }
+
+    @Test
+    void stoppingDuringRoleWriteRejectsReplyAndDoesNotPublishLateAuthority() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        repository.roleMutation = request -> {
+            entered.countDown();
+            waitFor(release);
+            return new RoleChangeResult(RoleChangeResult.Status.CHANGED,
+                    new AuthorizationSnapshot(request.targetUuid(), Role.ADMIN, 1), UUID.randomUUID());
+        };
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            PlayerAttempt player = attempt();
+            await(harness.service.prepare(player));
+            CompletionStage<RoleChangeResult> change = harness.service.changeRole(new RoleChangeRequest(
+                    new AuthorizationActor.LocalConsole(), player.identity().uuid(), Role.ADMIN, "Staff appointment"));
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                harness.service.requestStop(JOINED.plusSeconds(10));
+                assertFailure(UNAVAILABLE, change);
+            } finally {
+                release.countDown();
+            }
+            harness.barrier();
+            assertTrue(harness.service.authorization(player.token()).isEmpty());
+            assertTrue(harness.clock.getQueue().isEmpty());
+        }
+    }
+
+    @Test
+    void conflictingRoleAtTheSameRevisionFailsClosed() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        repository.authorizationBatch = uuids -> uuids.stream().collect(java.util.stream.Collectors.toMap(
+                uuid -> uuid, uuid -> new AuthorizationSnapshot(uuid, Role.ADMIN, 0)));
+        try (Harness harness = new Harness(repository, LIMITS, null, refreshLimits())) {
+            PlayerAttempt player = attempt();
+            await(harness.service.prepare(player));
+            waitUntil(() -> !harness.failures.isEmpty());
+            assertFalse(harness.service.isRunning());
+            assertTrue(harness.service.authorization(player.token()).isEmpty());
+            assertEquals(1, harness.failures.size());
+        }
+    }
+
+    @Test
+    void slowPreparationCannotPublishAnAlreadyExpiredAuthorization() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        repository.read = uuid -> {
+            try {
+                Thread.sleep(350);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(interrupted);
+            }
+            return Optional.empty();
+        };
+        try (Harness harness = new Harness(repository, LIMITS, null, refreshLimits())) {
+            PlayerAttempt player = attempt();
+            assertFailure(TIMED_OUT, harness.service.prepare(player));
+            assertFalse(harness.service.isPrepared(player.token()));
+            assertTrue(harness.service.authorization(player.token()).isEmpty());
+            assertTrue(harness.failures.isEmpty());
+        }
+    }
+
     private static final class Harness implements AutoCloseable {
         private final ExecutorService worker = Executors.newSingleThreadExecutor();
         private final CapturingClock clock = new CapturingClock();
@@ -670,13 +883,18 @@ class PlayerServiceTest {
         }
 
         private Harness(FakeRepository repository, PlayerServiceLimits limits, Executor rejectingWorker) throws Exception {
+            this(repository, limits, rejectingWorker, AuthorizationRefreshLimits.DEFAULT);
+        }
+
+        private Harness(FakeRepository repository, PlayerServiceLimits limits, Executor rejectingWorker,
+                        AuthorizationRefreshLimits refreshLimits) throws Exception {
             clock.setRemoveOnCancelPolicy(true);
             Logger logger = Logger.getAnonymousLogger();
             logger.setUseParentHandlers(false);
             service = worker.submit(() -> {
                 PlayerService initialized = new PlayerService(repository,
                         rejectingWorker == null ? worker : rejectingWorker, clock, failures::add,
-                        logger, Clock.fixed(JOINED.plusSeconds(3600), ZoneOffset.UTC), limits);
+                        logger, Clock.fixed(JOINED.plusSeconds(3600), ZoneOffset.UTC), limits, refreshLimits);
                 initialized.startOnWorker();
                 return initialized;
             }).get(2, TimeUnit.SECONDS);
@@ -723,6 +941,8 @@ class PlayerServiceTest {
         private final List<End> ends = new CopyOnWriteArrayList<>();
         private volatile Function<UUID, Optional<PlayerProfile>> read = uuid -> Optional.empty();
         private volatile Function<UUID, AuthorizationSnapshot> authorization = AuthorizationSnapshot::initial;
+        private volatile Function<List<UUID>, Map<UUID, AuthorizationSnapshot>> authorizationBatch;
+        private volatile Function<RoleChangeRequest, RoleChangeResult> roleMutation;
         private volatile Consumer<SessionStart> join = start -> {
         };
         private volatile Runnable end = () -> {
@@ -742,6 +962,21 @@ class PlayerServiceTest {
         @Override
         public LoadedPlayer loadPlayer(UUID uuid) {
             return new LoadedPlayer(findPlayer(uuid), authorization.apply(uuid));
+        }
+
+        @Override
+        public Map<UUID, AuthorizationSnapshot> loadAuthorizations(List<UUID> uuids) {
+            assertOwner();
+            if (authorizationBatch != null) {
+                return authorizationBatch.apply(uuids);
+            }
+            return uuids.stream().collect(java.util.stream.Collectors.toMap(uuid -> uuid, authorization));
+        }
+
+        @Override
+        public RoleChangeResult changeRole(RoleChangeRequest request) {
+            assertOwner();
+            return roleMutation.apply(request);
         }
 
         @Override

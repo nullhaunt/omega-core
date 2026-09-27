@@ -8,6 +8,7 @@ import io.papermc.paper.connection.PlayerConfigurationConnection;
 import io.papermc.paper.connection.PlayerLoginConnection;
 import io.papermc.paper.event.connection.PlayerConnectionValidateLoginEvent;
 import io.papermc.paper.event.connection.configuration.AsyncPlayerConnectionConfigureEvent;
+import io.papermc.paper.threadedregions.scheduler.EntityScheduler;
 import net.kyori.adventure.text.Component;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -15,6 +16,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.plugin.Plugin;
 
 import java.net.SocketAddress;
 import java.time.Clock;
@@ -34,6 +36,7 @@ public final class PlayerConnectionAdapter implements Listener, AutoCloseable {
     private static final Component RETRY = Component.text("Your player data could not finish loading. Please reconnect.");
     private static final Component DUPLICATE = Component.text("Your previous connection is still active. Please try again shortly.");
     private static final Component BUSY = Component.text("Omega Realm is busy loading players. Please try again shortly.");
+    private static final Component AUTHORITY_EXPIRED = Component.text("Your permissions could not be refreshed. Please reconnect.");
     private static final long RETENTION_NANOS = PlayerServiceLimits.DEFAULT.loadTimeout()
             .plus(PlayerServiceLimits.DEFAULT.preparedTimeout()).toNanos();
 
@@ -45,15 +48,17 @@ public final class PlayerConnectionAdapter implements Listener, AutoCloseable {
     private final Runnable criticalFailure;
     private final Logger logger;
     private final Clock time;
+    private final Plugin plugin;
     private boolean closed;
 
-    public PlayerConnectionAdapter(Supplier<RuntimeState> state, Supplier<PlayerService> players,
+    public PlayerConnectionAdapter(Plugin plugin, Supplier<RuntimeState> state, Supplier<PlayerService> players,
                                    Runnable criticalFailure, Logger logger, Clock time) {
         this.state = Objects.requireNonNull(state, "state");
         this.players = Objects.requireNonNull(players, "players");
         this.criticalFailure = Objects.requireNonNull(criticalFailure, "criticalFailure");
         this.logger = Objects.requireNonNull(logger, "logger");
         this.time = Objects.requireNonNull(time, "time");
+        this.plugin = Objects.requireNonNull(plugin, "plugin");
     }
 
     private static PlayerIdentity identity(PlayerProfile profile) {
@@ -203,6 +208,7 @@ public final class PlayerConnectionAdapter implements Listener, AutoCloseable {
     public void onJoin(PlayerJoinEvent event) {
         try {
             Player player = event.getPlayer();
+            EntityScheduler entityScheduler = player.getScheduler();
             Attempt attempt = lookup(player.getConnection().getAddress(),
                     new PlayerIdentity(player.getUniqueId(), player.getName()));
             boolean invalid;
@@ -213,6 +219,8 @@ public final class PlayerConnectionAdapter implements Listener, AutoCloseable {
                 invalid = closed || attempt == null || attempt.active;
                 if (!invalid) {
                     attempt.active = true;
+                    attempt.player = player;
+                    attempt.entityScheduler = entityScheduler;
                     joined.put(player, attempt);
                 }
             }
@@ -263,6 +271,9 @@ public final class PlayerConnectionAdapter implements Listener, AutoCloseable {
         }
         try {
             for (Attempt attempt : snapshot) {
+                if (attempt.active && attempt.service.requiresAuthorizationReconnect(attempt.attempt.token())) {
+                    reconnectExpired(attempt);
+                }
                 if (!attempt.active && (!attempt.connection.isConnected()
                         || System.nanoTime() - attempt.created >= RETENTION_NANOS
                         || state.get() != RuntimeState.READY)) {
@@ -274,6 +285,33 @@ public final class PlayerConnectionAdapter implements Listener, AutoCloseable {
         } catch (RuntimeException failure) {
             failAdapter();
         }
+    }
+
+    private void reconnectExpired(Attempt attempt) {
+        synchronized (connections) {
+            if (closed || attempt.reconnectScheduled || joined.get(attempt.player) != attempt) {
+                return;
+            }
+            attempt.reconnectScheduled = true;
+        }
+        // The handle was captured at join on the player thread. Retired entities need no
+        // kick; quit/shutdown owns session closure. A reconnect gets a different token.
+        attempt.entityScheduler.execute(plugin, () -> {
+            try {
+                synchronized (connections) {
+                    if (closed || joined.get(attempt.player) != attempt) {
+                        return;
+                    }
+                }
+                if (state.get() == RuntimeState.READY
+                        && attempt.service.requiresAuthorizationReconnect(attempt.attempt.token())) {
+                    attempt.player.kick(AUTHORITY_EXPIRED);
+                }
+            } catch (RuntimeException failure) {
+                failAdapter();
+            }
+        }, () -> {
+        }, 1);
     }
 
     @Override
@@ -345,6 +383,9 @@ public final class PlayerConnectionAdapter implements Listener, AutoCloseable {
         private final long created = System.nanoTime();
         private volatile boolean active;
         private volatile Component rejection;
+        private Player player;
+        private EntityScheduler entityScheduler;
+        private boolean reconnectScheduled;
 
         private Attempt(SocketAddress address, PlayerConfigurationConnection connection,
                         PlayerAttempt attempt, PlayerService service) {

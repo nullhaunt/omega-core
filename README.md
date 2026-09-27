@@ -76,9 +76,36 @@ join atomically creates the default `PLAYER` record with player/session history.
 does not reset elevated roles or revisions. The player service exposes snapshots by exact
 connection token and closes access on disconnect, failure or stop. Missing or invalid authority
 for an existing player fails closed rather than silently granting a default role.
-Role management writes, live updates, command masking, vanilla permission enforcement and
-entity/region gameplay scheduling remain future gates. Loading a role does not yet change
-Minecraft permissions or OP status.
+Local-console role changes now atomically replace the role, increment its revision and
+record actor, target, previous/new roles, reason, server and timestamp in `role_change_audit`.
+The writer rechecks stored actor/target authority while holding row locks; supplied player
+roles never establish authority. Missing targets and denied requests leave history unchanged.
+An authorized request for the existing role creates neither a revision nor an audit record.
+
+Use the actual local console (not RCON, players or command blocks):
+
+```text
+omega role set <uuid> <PLAYER|MODERATOR|ADMIN|OWNER> <reason>
+```
+
+The target must have a persisted player identity; offline targets are supported. UUIDs must
+use the canonical form. Role names accept either case; a reason of 1-512 characters is
+required. Command execution queues work without blocking a tick thread. The final console
+reply reports the committed revision and audit ID. If completion is uncertain, inspect audit
+history before retrying. Changes remain durable if shutdown wins after commit.
+
+Connected authorization is checked every second on the existing database worker, in batches
+of at most 64 identities with a 2-second refresh-query timeout. Snapshots expire five seconds
+after the start of their database observation. Expiry immediately denies snapshot access and
+requires relog; Paper reconciliation schedules the kick on the exact player's entity context.
+A delayed read cannot renew an expired connection, replace a newer revision or affect a
+reconnect. Role writes retain the existing 15-second mutation deadline; database/ownership
+failures still request whole-server shutdown. Polling and expiry use the existing owned clock.
+
+Player role commands, broader command masking, vanilla permission enforcement and general
+entity/region gameplay scheduling remain future gates. Changing a role updates Omega authority;
+it does not yet change Minecraft permissions or OP status. Production load and Folia remain
+unverified.
 
 ## Configuration
 

@@ -2,6 +2,7 @@ package com.omegarealm.core.player.paper;
 
 import com.destroystokyo.paper.event.player.PlayerConnectionCloseEvent;
 import com.omegarealm.core.RuntimeState;
+import com.omegarealm.core.authorization.AuthorizationRefreshLimits;
 import com.omegarealm.core.authorization.AuthorizationSnapshot;
 import com.omegarealm.core.player.*;
 import io.papermc.paper.connection.PlayerConfigurationConnection;
@@ -21,6 +22,7 @@ import java.lang.reflect.Proxy;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -258,6 +260,62 @@ class PlayerConnectionAdapterTest {
         }
     }
 
+    @Test
+    void freshnessExpirySchedulesOneKickOnTheOwningEntityContext() throws Exception {
+        try (Harness harness = new Harness(new AuthorizationRefreshLimits(
+                Duration.ofMillis(40), Duration.ofMillis(300), 2))) {
+            Connection connection = new Connection(1000, UUID.randomUUID());
+            harness.configure(connection);
+            harness.adapter.onJoin(new PlayerJoinEvent(connection.player, Component.empty()));
+            harness.barrier();
+            harness.repository.blockRefresh = true;
+            try {
+                assertTrue(harness.repository.entered.await(2, TimeUnit.SECONDS));
+                Thread.sleep(350);
+                harness.adapter.reconcile();
+                harness.adapter.reconcile();
+                assertEquals(1, connection.entityTasks.size());
+                assertEquals(0, connection.kicks.get());
+                connection.entityTasks.remove().run();
+                assertEquals(1, connection.kicks.get());
+                assertEquals(0, harness.failures.get());
+            } finally {
+                harness.repository.release.countDown();
+            }
+        }
+    }
+
+    @Test
+    void delayedExpiryKickCannotAffectAReconnectedPlayer() throws Exception {
+        try (Harness harness = new Harness(new AuthorizationRefreshLimits(
+                Duration.ofMillis(40), Duration.ofMillis(300), 2))) {
+            Connection old = new Connection(1000, UUID.randomUUID());
+            harness.configure(old);
+            harness.adapter.onJoin(new PlayerJoinEvent(old.player, Component.empty()));
+            harness.barrier();
+            harness.repository.blockRefresh = true;
+            try {
+                assertTrue(harness.repository.entered.await(2, TimeUnit.SECONDS));
+                Thread.sleep(350);
+                harness.adapter.reconcile();
+                assertEquals(1, old.entityTasks.size());
+                harness.adapter.onQuit(new PlayerQuitEvent(old.player, Component.empty(), PlayerQuitEvent.QuitReason.DISCONNECTED));
+            } finally {
+                harness.repository.blockRefresh = false;
+                harness.repository.release.countDown();
+            }
+            harness.barrier();
+            Connection next = new Connection(1001, old.uuid);
+            harness.configure(next);
+            assertTrue(harness.validate(next, null).isAllowed());
+            harness.adapter.onJoin(new PlayerJoinEvent(next.player, Component.empty()));
+            old.entityTasks.remove().run();
+            assertEquals(0, old.kicks.get());
+            assertEquals(0, next.kicks.get());
+            assertEquals(0, harness.failures.get());
+        }
+    }
+
     private static final class Harness implements AutoCloseable {
         private final ExecutorService io = Executors.newSingleThreadExecutor();
         private final ExecutorService events = Executors.newCachedThreadPool();
@@ -269,16 +327,21 @@ class PlayerConnectionAdapterTest {
         private final PlayerConnectionAdapter adapter;
 
         private Harness() throws Exception {
+            this(AuthorizationRefreshLimits.DEFAULT);
+        }
+
+        private Harness(AuthorizationRefreshLimits refreshLimits) throws Exception {
             Logger logger = Logger.getAnonymousLogger();
             logger.setUseParentHandlers(false);
             clock.setRemoveOnCancelPolicy(true);
             service = io.submit(() -> {
                 PlayerService initialized = new PlayerService(repository, io, clock,
-                        ignored -> failures.incrementAndGet(), logger, Clock.systemUTC(), PlayerServiceLimits.DEFAULT);
+                        ignored -> failures.incrementAndGet(), logger, Clock.systemUTC(), PlayerServiceLimits.DEFAULT, refreshLimits);
                 initialized.startOnWorker();
                 return initialized;
             }).get(2, TimeUnit.SECONDS);
-            adapter = new PlayerConnectionAdapter(state::get, () -> service, failures::incrementAndGet,
+            adapter = new PlayerConnectionAdapter(proxy(org.bukkit.plugin.Plugin.class, method -> null),
+                    state::get, () -> service, failures::incrementAndGet,
                     logger, Clock.systemUTC());
         }
 
@@ -324,6 +387,8 @@ class PlayerConnectionAdapterTest {
         private final AtomicBoolean connected = new AtomicBoolean(true);
         private final PlayerConfigurationConnection configuration;
         private final Player player;
+        private final java.util.Queue<Runnable> entityTasks = new ConcurrentLinkedQueue<>();
+        private final AtomicInteger kicks = new AtomicInteger();
 
         private Connection(int port, UUID uuid) {
             this.uuid = uuid;
@@ -343,10 +408,24 @@ class PlayerConnectionAdapterTest {
                 case "getAddress" -> address;
                 default -> throw new AssertionError("Unexpected game access: " + method);
             });
+            var entityScheduler = (io.papermc.paper.threadedregions.scheduler.EntityScheduler) Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{io.papermc.paper.threadedregions.scheduler.EntityScheduler.class},
+                    (object, method, arguments) -> {
+                        if (method.getName().equals("execute")) {
+                            entityTasks.add((Runnable) arguments[1]);
+                            return true;
+                        }
+                        throw new AssertionError("Unexpected entity scheduling");
+                    });
             player = proxy(Player.class, method -> switch (method) {
                 case "getUniqueId" -> uuid;
                 case "getName" -> "Player";
                 case "getConnection" -> game;
+                case "getScheduler" -> entityScheduler;
+                case "kick" -> {
+                    kicks.incrementAndGet();
+                    yield null;
+                }
                 default -> throw new AssertionError("Unexpected entity access: " + method);
             });
         }
@@ -360,10 +439,25 @@ class PlayerConnectionAdapterTest {
         private final CountDownLatch release = new CountDownLatch(1);
         private volatile boolean blockRead;
         private volatile boolean blockJoin;
+        private volatile boolean blockRefresh;
 
         @Override
         public LoadedPlayer loadPlayer(UUID uuid) {
             return new LoadedPlayer(findPlayer(uuid), AuthorizationSnapshot.initial(uuid));
+        }
+
+        @Override
+        public java.util.Map<UUID, AuthorizationSnapshot> loadAuthorizations(List<UUID> uuids) {
+            if (blockRefresh) {
+                block();
+            }
+            return uuids.stream().collect(java.util.stream.Collectors.toMap(uuid -> uuid, AuthorizationSnapshot::initial));
+        }
+
+        @Override
+        public com.omegarealm.core.authorization.RoleChangeResult changeRole(
+                com.omegarealm.core.authorization.RoleChangeRequest request) {
+            throw new UnsupportedOperationException();
         }
 
         @Override

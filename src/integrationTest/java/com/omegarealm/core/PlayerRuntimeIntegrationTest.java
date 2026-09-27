@@ -1,5 +1,8 @@
 package com.omegarealm.core;
 
+import com.omegarealm.core.authorization.AuthorizationActor;
+import com.omegarealm.core.authorization.Role;
+import com.omegarealm.core.authorization.RoleChangeRequest;
 import com.omegarealm.core.config.DatabaseConfig;
 import com.omegarealm.core.config.OmegaConfig;
 import com.omegarealm.core.config.ServerConfig;
@@ -338,6 +341,35 @@ class PlayerRuntimeIntegrationTest {
         assertTrue(runtime.readiness().toCompletableFuture().isCompletedExceptionally());
         OmegaRuntime replacement = runtime(config, "alpha");
         ready(replacement);
+        assertEquals(0, shutdowns.get());
+    }
+
+    @Test
+    void roleChangePublishesLocallyAndPropagatesToAnotherServerWithinFreshnessBound() throws Exception {
+        DatabaseConfig config = isolatedConfig();
+        OmegaRuntime alpha = runtime(config, "alpha");
+        ready(alpha);
+        PlayerAttempt local = attempt();
+        await(alpha.players().prepare(local));
+        await(alpha.players().activate(local.token(), Instant.now()));
+        OmegaRuntime beta = runtime(config, "beta");
+        ready(beta);
+        PlayerAttempt remote = new PlayerAttempt(UUID.randomUUID(), local.identity());
+        await(beta.players().prepare(remote));
+        await(beta.players().activate(remote.token(), Instant.now()));
+        long began = System.nanoTime();
+        var result = await(alpha.players().changeRole(new RoleChangeRequest(new AuthorizationActor.LocalConsole(),
+                local.identity().uuid(), Role.ADMIN, "Staff appointment")));
+        assertEquals(result.authorization(), alpha.players().authorization(local.token()).orElseThrow());
+        while (System.nanoTime() - began < TimeUnit.SECONDS.toNanos(5)
+                && !beta.players().authorization(remote.token()).map(result.authorization()::equals).orElse(false)) {
+            Thread.sleep(10);
+        }
+        assertEquals(result.authorization(), beta.players().authorization(remote.token()).orElseThrow());
+        assertTrue(System.nanoTime() - began < TimeUnit.SECONDS.toNanos(5));
+        try (Connection admin = admin(config)) {
+            assertEquals(1, scalar(admin, "SELECT count(*) FROM role_change_audit"));
+        }
         assertEquals(0, shutdowns.get());
     }
 

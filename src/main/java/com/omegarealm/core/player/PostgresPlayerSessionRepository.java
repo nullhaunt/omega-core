@@ -1,7 +1,6 @@
 package com.omegarealm.core.player;
 
-import com.omegarealm.core.authorization.AuthorizationSnapshot;
-import com.omegarealm.core.authorization.Role;
+import com.omegarealm.core.authorization.*;
 import com.omegarealm.core.database.Database;
 
 import java.sql.Connection;
@@ -12,9 +11,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.UUID;
+import java.util.*;
 
 import static com.omegarealm.core.player.PersistenceException.Kind.*;
 
@@ -149,6 +146,115 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
     public LoadedPlayer loadPlayer(UUID playerUuid) throws PersistenceException {
         Objects.requireNonNull(playerUuid, "playerUuid");
         return transaction("player preparation", () -> selectLoadedPlayer(playerUuid));
+    }
+
+    @Override
+    public Map<UUID, AuthorizationSnapshot> loadAuthorizations(List<UUID> playerUuids) throws PersistenceException {
+        List<UUID> identities = List.copyOf(playerUuids);
+        if (identities.size() > AuthorizationRefreshLimits.MAX_BATCH_SIZE) {
+            throw new IllegalArgumentException("Authorization batch exceeds its bound.");
+        }
+        return transaction("authorization refresh", () -> selectAuthorizations(identities, false));
+    }
+
+    private Map<UUID, AuthorizationSnapshot> selectAuthorizations(List<UUID> identities, boolean lock)
+            throws SQLException {
+        Map<UUID, AuthorizationSnapshot> result = new HashMap<>();
+        var values = connection.createArrayOf("uuid", identities.toArray());
+        try (PreparedStatement statement = prepare(connection, """
+                SELECT player_uuid, role, revision FROM player_authorizations
+                WHERE player_uuid = ANY (?) ORDER BY player_uuid
+                """ + (lock ? " FOR UPDATE" : ""))) {
+            if (!lock) {
+                statement.setQueryTimeout(2);
+            }
+            statement.setArray(1, values);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    UUID uuid = rows.getObject("player_uuid", UUID.class);
+                    long revision = rows.getLong("revision");
+                    if (rows.wasNull()) {
+                        throw new IllegalStateException("Authorization revision is missing.");
+                    }
+                    result.put(uuid, new AuthorizationSnapshot(uuid, Role.valueOf(rows.getString("role")), revision));
+                }
+            }
+        } finally {
+            values.free();
+        }
+        return Map.copyOf(result);
+    }
+
+    @Override
+    public RoleChangeResult changeRole(RoleChangeRequest request) throws PersistenceException {
+        Objects.requireNonNull(request, "request");
+        requireRecovered();
+        return transaction("role change", () -> {
+            if (request.actor() instanceof AuthorizationActor.Untrusted) {
+                return new RoleChangeResult(RoleChangeResult.Status.DENIED, null, null);
+            }
+            List<UUID> identities = request.actor() instanceof AuthorizationActor.Player actor
+                    ? List.of(request.targetUuid(), actor.uuid()) : List.of(request.targetUuid());
+            // Every writer locks actor and target in UUID order to serialize authority changes.
+            Map<UUID, AuthorizationSnapshot> locked = selectAuthorizations(identities, true);
+            AuthorizationSnapshot target = locked.get(request.targetUuid());
+            if (target == null) {
+                // Validate profile/authority in one statement. A first join can commit
+                // between statements; it must not be mistaken for a missing role row.
+                selectLoadedPlayer(request.targetUuid());
+                return new RoleChangeResult(RoleChangeResult.Status.NOT_FOUND, null, null);
+            }
+            AuthorizationActor authoritativeActor = request.actor();
+            if (request.actor() instanceof AuthorizationActor.Player actor) {
+                AuthorizationSnapshot authority = locked.get(actor.uuid());
+                if (authority == null) {
+                    selectLoadedPlayer(actor.uuid());
+                    return new RoleChangeResult(RoleChangeResult.Status.DENIED, null, null);
+                }
+                authoritativeActor = new AuthorizationActor.Player(actor.uuid(), authority.role());
+            }
+            if (!AuthorizationPolicy.canChangeRole(authoritativeActor,
+                    new AuthorizationActor.Player(target.playerUuid(), target.role()), request.role())) {
+                return new RoleChangeResult(RoleChangeResult.Status.DENIED, null, null);
+            }
+            if (target.role() == request.role()) {
+                return new RoleChangeResult(RoleChangeResult.Status.UNCHANGED, target, null);
+            }
+            long revision = Math.addExact(target.revision(), 1);
+            UUID auditId = UUID.randomUUID();
+            try (PreparedStatement statement = prepare(connection, """
+                    UPDATE player_authorizations SET role = ?, revision = ? WHERE player_uuid = ?
+                    """)) {
+                statement.setString(1, request.role().name());
+                statement.setLong(2, revision);
+                statement.setObject(3, target.playerUuid());
+                if (statement.executeUpdate() != 1) {
+                    throw new IllegalStateException("Role change target disappeared.");
+                }
+            }
+            try (PreparedStatement statement = prepare(connection, """
+                    INSERT INTO role_change_audit
+                        (id, server_id, actor_kind, actor_uuid, actor_role, target_uuid,
+                         previous_role, new_role, previous_revision, new_revision, reason)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """)) {
+                statement.setObject(1, auditId);
+                statement.setString(2, serverId);
+                boolean playerActor = authoritativeActor instanceof AuthorizationActor.Player;
+                statement.setString(3, playerActor ? "PLAYER" : "LOCAL_CONSOLE");
+                statement.setObject(4, playerActor ? ((AuthorizationActor.Player) authoritativeActor).uuid() : null);
+                statement.setString(5, playerActor ? ((AuthorizationActor.Player) authoritativeActor).role().name() : null);
+                statement.setObject(6, target.playerUuid());
+                statement.setString(7, target.role().name());
+                statement.setString(8, request.role().name());
+                statement.setLong(9, target.revision());
+                statement.setLong(10, revision);
+                statement.setString(11, request.reason());
+                statement.executeUpdate();
+            }
+            return new RoleChangeResult(RoleChangeResult.Status.CHANGED,
+                    new AuthorizationSnapshot(target.playerUuid(), request.role(), revision), auditId);
+        });
     }
 
     @Override

@@ -554,6 +554,17 @@ class OmegaRuntimeTest {
         }
 
         @Override
+        public java.util.Map<UUID, AuthorizationSnapshot> loadAuthorizations(java.util.List<UUID> uuids) {
+            return uuids.stream().collect(java.util.stream.Collectors.toMap(uuid -> uuid, AuthorizationSnapshot::initial));
+        }
+
+        @Override
+        public com.omegarealm.core.authorization.RoleChangeResult changeRole(
+                com.omegarealm.core.authorization.RoleChangeRequest request) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
         public Optional<PlayerProfile> findPlayer(UUID uuid) {
             return Optional.empty();
         }

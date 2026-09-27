@@ -1,5 +1,6 @@
 package com.omegarealm.core;
 
+import com.omegarealm.core.authorization.paper.ConsoleRoleCommand;
 import com.omegarealm.core.config.ConfigException;
 import com.omegarealm.core.config.ConfigLoader;
 import com.omegarealm.core.config.OmegaConfig;
@@ -8,6 +9,7 @@ import com.omegarealm.core.lifecycle.AdmissionGuard;
 import com.omegarealm.core.player.paper.PlayerConnectionAdapter;
 import com.omegarealm.core.scheduler.OmegaScheduler;
 import com.omegarealm.core.scheduler.paper.PaperOmegaScheduler;
+import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.time.Clock;
@@ -33,10 +35,14 @@ public final class OmegaPlugin extends JavaPlugin {
                     getServer().getAsyncScheduler(), getLogger(), this::schedulingFailed);
             runtime = new OmegaRuntime(config, getLogger(), database,
                     scheduler::global, this::stopServer);
-            playerConnections = new PlayerConnectionAdapter(this::state, runtime::players,
+            playerConnections = new PlayerConnectionAdapter(this, this::state, runtime::players,
                     runtime::failPlayerHandling, getLogger(), Clock.systemUTC());
             getServer().getPluginManager().registerEvents(playerConnections, this);
             scheduler.repeatAsync(Duration.ofMillis(250), Duration.ofMillis(250), playerConnections::reconcile);
+            ConsoleRoleCommand roleCommand = new ConsoleRoleCommand(getServer()::getConsoleSender,
+                    this::state, runtime::players, scheduler, getLogger(), this::schedulingFailed);
+            getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS,
+                    event -> event.registrar().register(roleCommand.node(), "Manage realm-wide player roles"));
             runtime.start();
         } catch (ConfigException exception) {
             getLogger().severe("Omega Core startup failed: " + exception.getMessage());
