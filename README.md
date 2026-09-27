@@ -7,7 +7,9 @@ One Gradle project produces one deployable plugin. No other Minecraft plugins ar
 
 `OmegaPlugin` adapts Paper lifecycle events to `OmegaRuntime`. Configuration is validated
 during bootstrap, then a dedicated worker initializes PostgreSQL, applies versioned migrations
-and checks connectivity. The runtime publishes `READY` through Paper's global scheduler.
+and checks connectivity. The same worker acquires exclusive ownership of `server.id`,
+recovers its interrupted sessions and starts the player service. The runtime publishes
+`READY` through Paper's global scheduler only after all of those steps succeed.
 Player admission stays closed until that handoff completes.
 
 Configuration, credentials, connection, migration and startup-timeout failures request an
@@ -37,12 +39,20 @@ connections are explicitly evicted; Hikari's raw exception logging is suppressed
 of controlled phase/SQLSTATE diagnostics. SQL statements have a 5-second query timeout;
 existing connection, socket, startup and shutdown bounds remain unchanged.
 
+`PlayerService` now coordinates immutable connection attempts through a bounded mailbox.
+Preparation reads a profile without writing history. Activation records an observed world
+join, and disconnect closes that exact session after its pending activation. Reconnect uses
+a new token, so old results and callbacks cannot replace or remove the new attempt.
+Timers bound loading, prepared-state retention, mutations and periodic ownership checks.
+Critical persistence failures, including idle ownership loss, close admission after `READY`
+and request server shutdown. Cleanup drains observed joins and departures before releasing
+ownership and closing the pool; unfinished sessions remain recoverable after a crash.
+
 Paper connection handling is the next slice: player loading must finish before world entry,
-as described in the [player/session gate contract](docs/PLAYER_SESSIONS.md). The repository
-is not wired into `OmegaRuntime` yet. Running the plugin still performs database bootstrap
-only; it does not acquire server ownership, load player profiles, record joins/quits, or
-recover sessions. Readiness currently covers that database foundation. The player service
-and ownership checks must join startup before the new connection handling is enabled.
+as described in the [player/session gate contract](docs/PLAYER_SESSIONS.md). The service is
+available through the runtime, but no Paper player listeners call it yet. Running the plugin
+acquires ownership and recovers sessions; it does not yet load connecting players or record
+their live joins/quits. Delayed loading before a full world join still needs Paper verification.
 Commands, authorization and the full gameplay scheduler remain future gates.
 
 ## Configuration
@@ -78,9 +88,9 @@ Use a Java 25 JDK, with `JAVA_HOME` pointing to that installation:
 .\gradlew.bat test build
 ```
 
-`test` runs configuration, admission and lifecycle tests. `build` also runs `integrationTest`
+`test` runs configuration, admission, lifecycle and player-service tests. `build` also runs `integrationTest`
 against isolated PostgreSQL 18.6 instances, verifying migrations, rollback, checksum
-validation, player/session transactions, ownership, recovery and pool cleanup.
+validation, player/session transactions, ownership, recovery, runtime integration and cleanup.
 Native test binaries download through Gradle on the first run;
 no existing database or Docker installation is used. Build success remains separate from
 Paper server verification.

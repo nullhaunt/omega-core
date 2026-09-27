@@ -12,14 +12,8 @@ public record SessionStart(UUID sessionId, UUID playerUuid, String username, Ins
 
     public SessionStart {
         Objects.requireNonNull(sessionId, "sessionId");
-        Objects.requireNonNull(playerUuid, "playerUuid");
-        Objects.requireNonNull(username, "username");
+        new PlayerIdentity(playerUuid, username);
         Objects.requireNonNull(joinedAt, "joinedAt");
-
-        if (username.isBlank() || username.length() > 16 || !username.equals(username.strip())
-                || username.chars().anyMatch(Character::isISOControl)) {
-            throw new IllegalArgumentException("Invalid player username metadata.");
-        }
 
         // PostgreSQL timestamps have microsecond precision; retries compare canonical inputs.
         joinedAt = joinedAt.truncatedTo(ChronoUnit.MICROS);
