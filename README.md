@@ -64,7 +64,15 @@ reconciliation through Paper. Closing it rejects new work and cancels owned task
 unexpected callback failures close dispatch and request server shutdown. The dedicated
 database worker remains the owner of ordered persistence work. The
 [scheduler contract](docs/SCHEDULER.md) documents cancellation and failure behavior.
-Commands, authorization and entity/region gameplay scheduling remain future gates.
+
+The first authorization gate supplies a platform-independent role/capability policy.
+Players have one role in the `PLAYER`, `MODERATOR`, `ADMIN`, `OWNER` hierarchy. Admins may
+manage moderator roles; owners may also manage admin roles; owner changes require the local
+console. Peer/superior targets and self-changes are protected. The
+[authorization contract](docs/AUTHORIZATION.md) records the policy and remaining gates.
+This model is not yet connected to player loading or Paper permission enforcement.
+Role persistence, live updates, command masking, vanilla permissions and entity/region
+gameplay scheduling remain future gates.
 
 ## Configuration
 
@@ -99,7 +107,8 @@ Use a Java 25 JDK, with `JAVA_HOME` pointing to that installation:
 .\gradlew.bat test build
 ```
 
-`test` runs configuration, admission, lifecycle, player-service and Paper adapter tests.
+`test` runs configuration, admission, lifecycle, authorization policy, player-service and
+Paper adapter tests.
 `build` also runs `integrationTest`
 against isolated PostgreSQL 18.6 instances, verifying migrations, rollback, checksum
 validation, player/session transactions, ownership, recovery, runtime integration and cleanup.
