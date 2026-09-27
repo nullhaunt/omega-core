@@ -31,7 +31,7 @@ public final class AdmissionGuard implements Listener {
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onPreLogin(AsyncPlayerPreLoginEvent event) {
         RuntimeState current = state.get();
-        if (current != RuntimeState.READY) {
+        if (current != RuntimeState.READY && event.getLoginResult() == AsyncPlayerPreLoginEvent.Result.ALLOWED) {
             event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_OTHER, message(current));
         }
     }
@@ -39,7 +39,7 @@ public final class AdmissionGuard implements Listener {
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onValidateLogin(PlayerConnectionValidateLoginEvent event) {
         RuntimeState current = state.get();
-        if (current != RuntimeState.READY) {
+        if (current != RuntimeState.READY && event.isAllowed()) {
             event.kickMessage(message(current));
         }
     }

@@ -122,6 +122,13 @@ public final class OmegaRuntime {
         }
     }
 
+    /**
+     * A platform invariant failure is as critical as an unavailable persistence service.
+     */
+    public void failPlayerHandling() {
+        fail("Player connection handling is unavailable.", false);
+    }
+
     private void initialize() {
         try {
             Database initialized = Objects.requireNonNull(bootstrap.initialize(), "initialized database");

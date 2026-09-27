@@ -5,9 +5,13 @@ import com.omegarealm.core.config.ConfigLoader;
 import com.omegarealm.core.config.OmegaConfig;
 import com.omegarealm.core.database.PostgresBootstrap;
 import com.omegarealm.core.lifecycle.AdmissionGuard;
+import com.omegarealm.core.player.paper.PlayerConnectionAdapter;
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 
@@ -15,6 +19,8 @@ public final class OmegaPlugin extends JavaPlugin {
 
     private final AtomicBoolean shutdownRequested = new AtomicBoolean();
     private volatile OmegaRuntime runtime;
+    private PlayerConnectionAdapter playerConnections;
+    private ScheduledTask connectionReconciliation;
 
     @Override
     public void onEnable() {
@@ -26,6 +32,11 @@ public final class OmegaPlugin extends JavaPlugin {
                     getLogger(), getClass().getClassLoader());
             runtime = new OmegaRuntime(config, getLogger(), database,
                     task -> getServer().getGlobalRegionScheduler().execute(this, task), this::stopServer);
+            playerConnections = new PlayerConnectionAdapter(this::state, runtime::players,
+                    runtime::failPlayerHandling, getLogger(), Clock.systemUTC());
+            getServer().getPluginManager().registerEvents(playerConnections, this);
+            connectionReconciliation = getServer().getAsyncScheduler().runAtFixedRate(this,
+                    task -> playerConnections.reconcile(), 250, 250, TimeUnit.MILLISECONDS);
             runtime.start();
         } catch (ConfigException exception) {
             getLogger().severe("Omega Core startup failed: " + exception.getMessage());
@@ -40,6 +51,13 @@ public final class OmegaPlugin extends JavaPlugin {
     public void onDisable() {
         if (!getServer().isStopping()) {
             stopServer();
+        }
+
+        if (connectionReconciliation != null) {
+            connectionReconciliation.cancel();
+        }
+        if (playerConnections != null) {
+            playerConnections.close();
         }
 
         if (runtime != null) {
@@ -58,7 +76,7 @@ public final class OmegaPlugin extends JavaPlugin {
 
     private RuntimeState state() {
         OmegaRuntime current = runtime;
-        if (shutdownRequested.get()) {
+        if (shutdownRequested.get() || getServer().isStopping()) {
             return RuntimeState.STOPPING;
         }
 

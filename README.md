@@ -48,11 +48,16 @@ Critical persistence failures, including idle ownership loss, close admission af
 and request server shutdown. Cleanup drains observed joins and departures before releasing
 ownership and closing the pool; unfinished sessions remain recoverable after a crash.
 
-Paper connection handling is the next slice: player loading must finish before world entry,
-as described in the [player/session gate contract](docs/PLAYER_SESSIONS.md). The service is
-available through the runtime, but no Paper player listeners call it yet. Running the plugin
-acquires ownership and recovers sessions; it does not yet load connecting players or record
-their live joins/quits. Delayed loading before a full world join still needs Paper verification.
+Paper connection handling now holds asynchronous configuration until player preparation
+finishes. A later login validation reads readiness and the exact prepared connection without
+I/O; it preserves bans and other restrictions. World join queues session activation, and quit
+queues closure without waiting on a tick thread. Disconnect during loading, abandoned attempts
+and rapid reconnect use exact tokens and connection handles, with bounded reconciliation.
+Server shutdown drains active sessions with `SHUTDOWN` rather than inventing a normal quit.
+The [player/session gate contract](docs/PLAYER_SESSIONS.md) records ownership, limits and
+verification. A disposable Paper protocol client verified delayed preparation before world
+entry, chunk delivery and live session recording. Visual-client, proxy, Folia and production
+load behavior remain separate evidence boundaries.
 Commands, authorization and the full gameplay scheduler remain future gates.
 
 ## Configuration
@@ -88,7 +93,8 @@ Use a Java 25 JDK, with `JAVA_HOME` pointing to that installation:
 .\gradlew.bat test build
 ```
 
-`test` runs configuration, admission, lifecycle and player-service tests. `build` also runs `integrationTest`
+`test` runs configuration, admission, lifecycle, player-service and Paper adapter tests.
+`build` also runs `integrationTest`
 against isolated PostgreSQL 18.6 instances, verifying migrations, rollback, checksum
 validation, player/session transactions, ownership, recovery, runtime integration and cleanup.
 Native test binaries download through Gradle on the first run;
@@ -116,6 +122,11 @@ For a manual lifecycle check, deploy the built plugin to a disposable Paper 26.3
    once, and the server process exits without an operator issuing `stop`.
 6. Remove the password variable or make PostgreSQL unreachable. Confirm admission remains
    closed and the server exits automatically with a controlled bootstrap failure.
+7. With an isolated database, deliberately delay a profile read during connection configuration.
+   Confirm there is no world join or session write until preparation completes. Disconnect
+   during loading and confirm no session is created; reconnect, join and quit, then verify
+   distinct session IDs and the exact close reasons. A critical read failure must close
+   admission and stop the server. Never apply these fixtures to a live database.
 
 The repository's `runServer` task retains its existing development JVM settings. Review
 those settings before using it on a machine with limited available memory.

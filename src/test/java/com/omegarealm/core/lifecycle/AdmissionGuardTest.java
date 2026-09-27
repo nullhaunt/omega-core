@@ -65,9 +65,10 @@ class AdmissionGuardTest {
         assertFalse(validation.isAllowed());
     }
 
-    @Test
-    void readinessDoesNotOverrideOtherAdmissionRestrictions() {
-        AdmissionGuard guard = new AdmissionGuard(() -> RuntimeState.READY);
+    @ParameterizedTest
+    @EnumSource(RuntimeState.class)
+    void readinessDoesNotOverrideOtherAdmissionRestrictions(RuntimeState state) {
+        AdmissionGuard guard = new AdmissionGuard(() -> state);
         Component banned = Component.text("Existing restriction");
         AsyncPlayerPreLoginEvent preLogin = preLogin();
         preLogin.disallow(AsyncPlayerPreLoginEvent.Result.KICK_BANNED, banned);
