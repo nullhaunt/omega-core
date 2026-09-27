@@ -21,19 +21,31 @@ public final class PostgresBootstrap implements DatabaseBootstrap {
     private final Logger logger;
     private final ClassLoader classLoader;
     private final String migrationLocation;
+    private final boolean debug;
 
     public PostgresBootstrap(DatabaseConfig config, Function<String, String> environment,
                              Logger logger, ClassLoader classLoader) {
-        this(config, environment, logger, classLoader, "classpath:db/migration");
+        this(config, environment, logger, classLoader, "classpath:db/migration", false);
+    }
+
+    public PostgresBootstrap(DatabaseConfig config, Function<String, String> environment,
+                             Logger logger, ClassLoader classLoader, boolean debug) {
+        this(config, environment, logger, classLoader, "classpath:db/migration", debug);
     }
 
     PostgresBootstrap(DatabaseConfig config, Function<String, String> environment,
                       Logger logger, ClassLoader classLoader, String migrationLocation) {
+        this(config, environment, logger, classLoader, migrationLocation, false);
+    }
+
+    PostgresBootstrap(DatabaseConfig config, Function<String, String> environment,
+                      Logger logger, ClassLoader classLoader, String migrationLocation, boolean debug) {
         this.config = Objects.requireNonNull(config, "config");
         this.environment = Objects.requireNonNull(environment, "environment");
         this.logger = Objects.requireNonNull(logger, "logger");
         this.classLoader = Objects.requireNonNull(classLoader, "classLoader");
         this.migrationLocation = Objects.requireNonNull(migrationLocation, "migrationLocation");
+        this.debug = debug;
     }
 
     private static void checkConnection(HikariDataSource pool) throws SQLException {
@@ -57,6 +69,8 @@ public final class PostgresBootstrap implements DatabaseBootstrap {
 
     @Override
     public Database initialize() throws DatabaseException {
+        long started = System.nanoTime();
+        debugStage("credentials.check", started);
         String password = environment.apply(config.passwordEnvironment());
         if (password == null || password.isBlank()) {
             throw new DatabaseException("Database credentials unavailable: the environment variable named by database.password-env must be nonblank.");
@@ -65,41 +79,63 @@ public final class PostgresBootstrap implements DatabaseBootstrap {
         HikariDataSource pool = null;
         boolean transferred = false;
         String phase = "connection";
+        MigrationDiagnostics diagnostics = new MigrationDiagnostics(logger, debug);
 
         try {
             checkInterrupted();
+            debugStage("connection.begin", started);
             pool = createPool(password);
             checkConnection(pool);
+            debugStage("connection.complete", started);
             checkInterrupted();
 
             phase = "migration";
-            int applied = Flyway.configure(classLoader)
+            debugStage("migration.discovery", started);
+            Flyway flyway = Flyway.configure(classLoader)
                     .dataSource(pool)
                     .locations(migrationLocation)
                     .failOnMissingLocations(true)
                     .validateMigrationNaming(true)
                     .validateOnMigrate(true)
+                    // Match migrate's normal allowance for pending scripts and future history.
+                    .ignoreMigrationPatterns("*:future", "*:pending")
                     .baselineOnMigrate(false)
                     .cleanDisabled(true)
                     .connectRetries(0)
                     .lockRetryCount(5)
                     .loggers(MigrationLogCreator.class.getName())
-                    .load()
-                    .migrate().migrationsExecuted;
+                    .callbacks(diagnostics)
+                    .load();
+            diagnostics.validation(flyway.validateWithResult());
+            checkInterrupted();
+            int applied = flyway.migrate().migrationsExecuted;
 
             checkInterrupted();
             phase = "health check";
+            debugStage("health-check.begin", started);
             checkConnection(pool);
+            debugStage("health-check.complete", started);
             logger.info("Database migrations validated; applied " + applied + " migration(s).");
 
             transferred = true;
             return new PostgresDatabase(pool);
         } catch (SQLException | RuntimeException failure) {
-            throw DatabaseException.failure(phase, failure);
+            DatabaseException summary = DatabaseException.failure(phase, failure);
+            String version = diagnostics.activeVersion();
+            throw version == null ? summary
+                    : new DatabaseException(summary.getMessage() + " Migration version=" + version + ".");
         } finally {
             if (!transferred && pool != null) {
                 PostgresDatabase.closePool(pool);
+                debugStage("cleanup.complete", started);
             }
+        }
+    }
+
+    private void debugStage(String stage, long started) {
+        if (debug) {
+            long elapsed = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+            logger.info("Database bootstrap debug: stage=" + stage + ", elapsed-ms=" + elapsed + ".");
         }
     }
 

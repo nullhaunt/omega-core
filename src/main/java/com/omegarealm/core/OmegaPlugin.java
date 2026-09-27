@@ -13,7 +13,6 @@ import org.bukkit.plugin.java.JavaPlugin;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.logging.Level;
 
 public final class OmegaPlugin extends JavaPlugin {
 
@@ -29,7 +28,7 @@ public final class OmegaPlugin extends JavaPlugin {
         try {
             OmegaConfig config = new ConfigLoader().load(getDataFolder().toPath());
             PostgresBootstrap database = new PostgresBootstrap(config.database(), System::getenv,
-                    getLogger(), getClass().getClassLoader());
+                    getLogger(), getClass().getClassLoader(), config.debug());
             scheduler = new PaperOmegaScheduler(this, getServer().getGlobalRegionScheduler(),
                     getServer().getAsyncScheduler(), getLogger(), this::schedulingFailed);
             runtime = new OmegaRuntime(config, getLogger(), database,
@@ -43,7 +42,7 @@ public final class OmegaPlugin extends JavaPlugin {
             getLogger().severe("Omega Core startup failed: " + exception.getMessage());
             stopServer();
         } catch (RuntimeException exception) {
-            getLogger().log(Level.SEVERE, "Unexpected Omega Core startup failure.", exception);
+            getLogger().severe("Unexpected Omega Core startup failure; check the deployment and configuration.");
             stopServer();
         }
     }

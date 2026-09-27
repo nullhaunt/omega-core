@@ -18,4 +18,5 @@ database:
   # Positive integer. Start small; tune using measurements.
   pool-size: 5
 
+# Controlled startup/migration detail; requires restart. Never logs credentials or raw SQL/errors.
 debug: false

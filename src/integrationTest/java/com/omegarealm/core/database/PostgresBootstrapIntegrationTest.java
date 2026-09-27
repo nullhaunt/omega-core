@@ -6,6 +6,8 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.InputStream;
 import java.net.InetAddress;
@@ -111,13 +113,16 @@ class PostgresBootstrapIntegrationTest {
         }
     }
 
-    @Test
-    void failedMigrationRollsBackAndDoesNotExposeSqlText() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedMigrationRollsBackAndDoesNotExposeSqlText(boolean debug) throws Exception {
         DatabaseConfig config = isolatedConfig();
         DatabaseException failure = assertThrows(DatabaseException.class,
-                () -> bootstrap(config, "classpath:db/broken").initialize());
+                () -> bootstrap(config, "classpath:db/broken", debug).initialize());
 
         assertTrue(failure.getMessage().contains("migration failed"));
+        assertTrue(failure.getMessage().contains("SQLSTATE 42703"), failure::getMessage);
+        assertTrue(failure.getMessage().contains("Migration version=001"), failure::getMessage);
         assertFalse(failure.getMessage().contains("DO_NOT_LOG_THIS"));
         assertNull(failure.getCause());
         assertFalse(messages.stream().anyMatch(message -> message.contains("DO_NOT_LOG_THIS")));
@@ -129,8 +134,9 @@ class PostgresBootstrapIntegrationTest {
         assertPoolThreadsTerminated();
     }
 
-    @Test
-    void checksumMismatchPreventsStartup() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void checksumMismatchPreventsStartup(boolean debug) throws Exception {
         DatabaseConfig config = isolatedConfig();
         Path migrations = Files.createDirectory(directory.resolve("checksum-" + UUID.randomUUID()));
         Path script = migrations.resolve("V001__create_players.sql");
@@ -138,7 +144,7 @@ class PostgresBootstrapIntegrationTest {
             assertNotNull(source);
             Files.writeString(script, new String(source.readAllBytes(), StandardCharsets.UTF_8));
         }
-        PostgresBootstrap bootstrap = bootstrap(config, "filesystem:" + migrations);
+        PostgresBootstrap bootstrap = bootstrap(config, "filesystem:" + migrations, debug);
         try (Database database = bootstrap.initialize()) {
             assertNotNull(database);
         }
@@ -147,6 +153,9 @@ class PostgresBootstrapIntegrationTest {
         DatabaseException failure = assertThrows(DatabaseException.class, bootstrap::initialize);
 
         assertTrue(failure.getMessage().contains("migration failed"));
+        assertTrue(failure.getMessage().contains("CHECKSUM_MISMATCH, version=001"));
+        assertTrue(messages.stream().anyMatch(message -> message.contains("CHECKSUM_MISMATCH, version=001")));
+        assertEquals(debug, messages.stream().anyMatch(message -> message.contains("bootstrap debug:")));
         assertPoolThreadsTerminated();
     }
 
@@ -158,7 +167,10 @@ class PostgresBootstrapIntegrationTest {
             statement.execute("CREATE TABLE unmanaged_data (id INTEGER)");
         }
 
-        assertThrows(DatabaseException.class, () -> bootstrap(config, "classpath:db/migration").initialize());
+        DatabaseException failure = assertThrows(DatabaseException.class,
+                () -> bootstrap(config, "classpath:db/migration").initialize());
+        assertTrue(failure.getMessage().contains("NON_EMPTY_SCHEMA_WITHOUT_SCHEMA_HISTORY_TABLE"));
+        assertTrue(failure.getMessage().contains("cannot be adopted automatically"));
         assertPoolThreadsTerminated();
     }
 
@@ -236,6 +248,10 @@ class PostgresBootstrapIntegrationTest {
     }
 
     private PostgresBootstrap bootstrap(DatabaseConfig config, String location) {
+        return bootstrap(config, location, false);
+    }
+
+    private PostgresBootstrap bootstrap(DatabaseConfig config, String location, boolean debug) {
         Logger logger = Logger.getAnonymousLogger();
         logger.setUseParentHandlers(false);
         logger.addHandler(new Handler() {
@@ -252,6 +268,7 @@ class PostgresBootstrapIntegrationTest {
             public void close() {
             }
         });
-        return new PostgresBootstrap(config, ignored -> "test-only-password", logger, getClass().getClassLoader(), location);
+        return new PostgresBootstrap(config, ignored -> "test-only-password", logger,
+                getClass().getClassLoader(), location, debug);
     }
 }

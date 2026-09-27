@@ -90,12 +90,21 @@ unrequested systems. Creating this file does not authorize the next implementati
   SQLSTATE where appropriate. Do not expose input values, YAML excerpts, SQL source,
   raw driver/Flyway exception messages, or secret-bearing exception chains. Audit
   third-party logging as well as application logging.
+- `debug` enables controlled diagnostic detail and requires restart. Use it during a
+  diagnostic pass: report startup stages, elapsed time and validated migration versions.
+  Known failure reasons, migration versions, SQLSTATE and actionable recovery guidance
+  must remain available with debug off. Never make debug an exception to the credential,
+  SQL-source or raw exception-chain restrictions above; do not enable raw Flyway/driver
+  logging. Inspect the failing artifact and migration history before changing schema.
+  Do not automatically repair, baseline, clean, alter applied migrations or restart a live
+  server to gather diagnostics. Read-only database inspection should remain bounded.
 - Use structured data-source configuration rather than concatenated JDBC URLs. Use
   prepared statements for data values and explicit transactions for atomic workflows.
   Connections and statements require deterministic closure.
 - Flyway owns versioned migrations, history, validation, and migration locking. Applied
-  migrations are immutable; schema changes require a new versioned script. Do not
-  automatically baseline, repair, clean, or adopt an unmanaged nonempty schema.
+  migrations are immutable, including whitespace and comments; schema changes require a
+  new versioned script. Restore the original script when accidental edits cause a checksum
+  mismatch. Do not automatically baseline, repair, clean, or adopt an unmanaged nonempty schema.
 - UUID is authoritative player identity. Usernames are mutable metadata. Session
   uniqueness and recovery need an explicit join/reconnect contract before implementation.
 

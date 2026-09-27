@@ -97,7 +97,15 @@ Changes require a server restart; application hot reload is not supported.
   underscores, starting with a letter or underscore. Store only the name here.
 - `database.pool-size`: positive YAML integer, at most 2147483647. The default is 5;
   keep it small and tune based on measurements.
-- `debug`: YAML boolean. Reserved for later diagnostic behavior.
+- `debug`: YAML boolean. Enables controlled startup stages, elapsed timings and migration
+  progress. Known failure reasons and migration versions are reported even with debug off.
+  Debug never enables raw SQL, credentials or third-party exception logging.
+
+For a diagnostic pass, set `debug: true` in the operator configuration and restart using
+the rebuilt shaded JAR. Check the reported startup stage, SQLSTATE, migration reason and
+version before changing database state. A `CHECKSUM_MISMATCH` means the applied script and
+artifact differ; restore the original script instead of repairing history. Applied scripts
+must remain unchanged, including SQL whitespace and comments.
 
 Never store database passwords in configuration or Git. `OMEGA_DB_PASSWORD` is the default
 variable name. Its value must be nonblank in the server process environment. The target
