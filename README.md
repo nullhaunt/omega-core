@@ -82,7 +82,7 @@ The writer rechecks stored actor/target authority while holding row locks; suppl
 roles never establish authority. Missing targets and denied requests leave history unchanged.
 An authorized request for the existing role creates neither a revision nor an audit record.
 
-Use the actual local console (not RCON, players or command blocks):
+Use the actual local console, or an authenticated ADMIN/OWNER player:
 
 ```text
 omega role set <uuid> <PLAYER|MODERATOR|ADMIN|OWNER> <reason>
@@ -91,7 +91,13 @@ omega role set <uuid> <PLAYER|MODERATOR|ADMIN|OWNER> <reason>
 The target must have a persisted player identity; offline targets are supported. UUIDs must
 use the canonical form. Role names accept either case; a reason of 1-512 characters is
 required. Command execution queues work without blocking a tick thread. The final console
-reply reports the committed revision and audit ID. If completion is uncertain, inspect audit
+or player reply reports the committed revision and audit ID. ADMIN can assign PLAYER/MODERATOR;
+OWNER can also assign ADMIN. Only local console can change OWNER. RCON, command blocks,
+delegated execution, self-changes and peer/superior targets cannot grant Omega authority.
+Authorized staff receive usage guidance for incomplete commands and specific UUID, role and
+reason validation messages. Self-changes explain the local-console requirement; other policy
+denials explain that no role change was made. Command access remains hidden from non-staff.
+If completion is uncertain, inspect audit
 history before retrying. Changes remain durable if shutdown wins after commit.
 
 Connected authorization is checked every second on the existing database worker, in batches
@@ -102,10 +108,53 @@ A delayed read cannot renew an expired connection, replace a newer revision or a
 reconnect. Role writes retain the existing 15-second mutation deadline; database/ownership
 failures still request whole-server shutdown. Polling and expiry use the existing owned clock.
 
-Player role commands, broader command masking, vanilla permission enforcement and general
-entity/region gameplay scheduling remain future gates. Changing a role updates Omega authority;
-it does not yet change Minecraft permissions or OP status. Production load and Folia remain
-unverified.
+Players now receive an explicit default-deny Bukkit attachment, including permissions which
+normally default to true. Players remain non-OP, persisted OP entries are cleared before
+admission, and the native OP command is disabled. ADMIN/OWNER receive the reviewed native
+management catalog below; PLAYER/MODERATOR receive no native command grants in this gate.
+Omega's custom gameplay commands will supply their own capability checks in subsequent gates.
+
+| Tools | ADMIN/OWNER grants |
+| --- | --- |
+| Server diagnostics | version/ver/about, plugins/pl, tps, mspt |
+| Paper | chunkinfo, debug, entity, fixlight, heap, holderinfo, mobcaps, playermobcaps, dumpplugins, dumplisteners, version/ver |
+| spark | health/healthreport, profiler/sampler, tps, ping, gc, gcmonitor, tickmonitor, heapsummary, heapdump, activity |
+| World settings | difficulty, gamerule, time, weather, worldborder, defaultgamemode, setworldspawn |
+| Maintenance | whitelist, save-all, setidletimeout, forceload |
+
+No parent or wildcard permissions are granted. Native OP, reload, stop/restart, save-off/on,
+moderation, automation and gameplay commands remain unavailable in-game. Maintenance includes
+whitelist's own reload operation; this does not grant server/datapack reload. Native tools
+retain their existing handlers and effects, including diagnostic exports and maintenance I/O.
+They run in the requesting player's context. Local console retains its native management tools,
+except OP and server/datapack reload. Reload rebuilds the dispatcher and is incompatible with
+this enforcement boundary; use a full restart. Omega has no controlled shutdown/restart command yet.
+
+Denied commands and Paper/spark branches are absent from client trees and server suggestions,
+and fail through Minecraft's unknown/incomplete command parser. Existing vanilla argument types
+are preserved. Execution rechecks exact, fresh connected authority even after parsing. Clickable
+sign command execution is disabled because Paper elevates its native permissions. Authorized
+native invocations log actor UUID and literal command path; role changes retain their durable audit.
+Command arguments/reasons are not copied into invocation logs.
+
+One attachment is owned by each exact connection. Reconciliation observes changes every 250 ms
+and applies them on the captured entity scheduler, then refreshes the client tree. Authority
+is denied while its attachment revision differs from the fresh snapshot. An application delay
+of five seconds becomes terminal and requires reconnect; the kick waits for the owning thread.
+Database freshness expiry keeps its existing independent five-second deadline.
+
+The native integration is confined to `NativeCommandFence`, using Paper's native dispatcher because
+the public API exposes opaque vanilla handlers. The dev bundle follows 26.3 development builds;
+runtime startup accepts any Paper 26.3 build, including unidentified local builds. Build numbers
+are not compatibility gates. An actual command API linkage or enforcement setup failure still
+closes admission and stops the server. Other Minecraft versions/brands are outside this target.
+Disposable runtime verification covers builds 42 and 49; this is evidence, not a build allowlist.
+This enforcement is installed at server load before runtime bootstrap starts and
+can publish READY. New commands belong in the normal command-registration lifecycle. Other
+Omega plugins must use application authority, not attachments or OP as credentials; arbitrary
+plugins running in the same JVM are trusted code, not sandboxed by this permission boundary.
+Central command organization, username/UUID resolution, general gameplay scheduling, controlled
+shutdown/restart, backup/rollback, production load and Folia remain separate gates.
 
 ## Configuration
 

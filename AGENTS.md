@@ -25,6 +25,9 @@ unrequested systems. Creating this file does not authorize the next implementati
 ## Project shape
 
 - Target Java 25 and Paper 26.3. Use the Gradle wrapper and Kotlin build script.
+  Follow 26.3 development builds without an exact-build startup lock. Build numbers are
+  evidence metadata, not compatibility gates. Actual native API linkage or enforcement
+  setup failure must still fail closed; other Minecraft versions/brands are outside the target.
 - Keep one Gradle project and one deployable plugin using conventional `plugin.yml`.
   No other Minecraft plugins are required. Implementation libraries are appropriate
   when they solve a concrete problem and have clear ownership and packaging.
@@ -40,6 +43,9 @@ unrequested systems. Creating this file does not authorize the next implementati
 - Add abstractions for meaningful boundaries, not anticipated features. Do not introduce
   DI frameworks, extra modules, Redis, microservices, NMS, packet manipulation, or gameplay
   systems without an actual requirement. Keep dependency direction explicit.
+  The current exception is `authorization/paper/NativeCommandFence`: public Paper nodes
+  hide vanilla handlers, so this isolated native dispatcher adapter preserves parsing while
+  enforcing fresh authority. Keep further native access confined to an explicit requirement.
 
 ## Lifecycle and safety contracts
 
@@ -178,17 +184,45 @@ $env:JAVA_HOME = 'D:\Dev\.jdks\ms-25.0.4.1'
 ## Current handoff — 2026-09-27
 
 Player/session persistence, connection preparation, ordered worker ownership, scheduler
-integration, role policy and realm-wide role loading are implemented. Console role changes
-now use V005 audit history and atomic authoritative checks; connected snapshots refresh in
-bounded batches and expire after five seconds. Physical reconnect runs on the exact player's
-entity scheduler. No new resource owners or configuration keys were added.
+integration, role policy, realm-wide role loading, console/player role commands and native
+permission enforcement are implemented. V005 audit history and stored actor/target checks
+protect mutations. Snapshots expire after five seconds. Player attachments default-deny
+registered permissions; no wildcard/parent grants or OP establish Omega authority. ADMIN
+and OWNER receive the explicit diagnostics/world-settings/maintenance catalog in README.
+Native command parsing, execution and suggestions recheck exact fresh authority. Sign command
+execution and native OP are disabled. Server/datapack reload is also disabled for console,
+because it rebuilds the dispatcher; use full restart. Persisted OP entries are cleared before admission.
 
-Java 25 build passed with 250 unit tests and 51 native PostgreSQL tests. The native suite
-includes concurrent role writers, audit rollback and propagation between two runtime/server
-IDs. Disposable Paper 26.3 build 42 verified console and namespaced changes, OP player denial,
-local publication, no-op behavior, expiry during a worker stall, exact session closure and
-clean shutdown. Live deployment, production load and Folia were not verified. General vanilla
-permission enforcement, OP control and player-facing role commands remain subsequent gates.
+ServerLoad installs native enforcement before runtime bootstrap can start and publish READY.
+Permission changes reconcile every 250 ms on captured entity handles; stale applied revisions
+deny commands, and a five-second application delay requires reconnect. Physical kicks wait
+for the owning context. The existing scheduler owns reconciliation/registry refresh tasks;
+the permission adapter owns attachments. No new executors or configuration keys were added.
+Command organization, username/UUID lookup, controlled shutdown/restart, backup/rollback and
+general gameplay scheduling are deferred slices.
+
+Java 25 checks passed with 269 unit tests and 51 native PostgreSQL tests. Database evidence
+includes concurrent writers, audit rollback and propagation between two runtime/server IDs.
+Disposable Paper 26.3 build 42 verified native parsing/tools, namespace and branch masking,
+client trees, persisted OP clearing/bypass denial, sign-event cancellation, console reload/OP
+denial, audited player role writes, promotion/demotion, expiry and clean shutdown. The final
+registry-plan comparison received focused unit/build verification. See the authorization
+contract for limits. Physical sign-click, graphical-client, live deployment, production load
+and Folia remain unverified.
+
+The exact Paper-build startup lock was removed. Target checks accept Paper 26.3 regardless
+of its build number, while actual API linkage/setup failure remains critical. The dev bundle
+again follows `26.3.build.+`. The 269-unit suite and disposable Paper builds 42 and 49 passed
+after this correction; no developer/production server was modified.
+
+Role-command feedback now separates command access from operation validation. Non-staff
+still receive native parser rejection. Authorized staff receive usage and validation messages;
+self-changes remain protected and explain the local-console requirement. Stored policy denials
+report that no change was made. Revocation after parsing includes native input/cursor context.
+This correction passed 274 unit tests, shaded packaging and a fresh isolated Paper build-49
+check of client message delivery, primary/namespaced paths, unchanged denial audits/revisions,
+role writes, masking, expiry and cleanup. The 51-test database suite above is prior evidence;
+the persistence writer was unchanged. Graphical-client rendering remains unverified.
 
 The earlier snapshot below records bootstrap evidence only; it is not current feature status.
 

@@ -3,6 +3,7 @@ package com.omegarealm.core.player.paper;
 import com.destroystokyo.paper.event.player.PlayerConnectionCloseEvent;
 import com.destroystokyo.paper.profile.PlayerProfile;
 import com.omegarealm.core.RuntimeState;
+import com.omegarealm.core.authorization.AuthorizationSnapshot;
 import com.omegarealm.core.player.*;
 import io.papermc.paper.connection.PlayerConfigurationConnection;
 import io.papermc.paper.connection.PlayerLoginConnection;
@@ -64,6 +65,41 @@ public final class PlayerConnectionAdapter implements Listener, AutoCloseable {
     private static PlayerIdentity identity(PlayerProfile profile) {
         return profile == null || profile.getId() == null || profile.getName() == null
                 ? null : new PlayerIdentity(profile.getId(), profile.getName());
+    }
+
+    /**
+     * Identity lookup only: UUID equality must never authenticate a replacement connection.
+     */
+    public Optional<AuthorizationSnapshot> authorization(Player player) {
+        Attempt attempt;
+        synchronized (connections) {
+            attempt = closed ? null : joined.get(player);
+        }
+        return attempt == null || state.get() != RuntimeState.READY
+                ? Optional.empty() : attempt.service.authorization(attempt.attempt.token());
+    }
+
+    /**
+     * Schedule a reply using the handle captured on this exact connection's join thread.
+     */
+    public void reply(Player player, Runnable reply) {
+        Attempt attempt;
+        synchronized (connections) {
+            attempt = closed ? null : joined.get(player);
+        }
+        if (attempt == null) {
+            return;
+        }
+        attempt.entityScheduler.execute(plugin, () -> {
+            try {
+                if (authorization(player).isPresent()) {
+                    reply.run();
+                }
+            } catch (RuntimeException failure) {
+                failAdapter();
+            }
+        }, () -> {
+        }, 1);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -204,7 +240,7 @@ public final class PlayerConnectionAdapter implements Listener, AutoCloseable {
         }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR)
+    @EventHandler(priority = EventPriority.LOWEST)
     public void onJoin(PlayerJoinEvent event) {
         try {
             Player player = event.getPlayer();
