@@ -6,12 +6,12 @@ import com.omegarealm.core.config.OmegaConfig;
 import com.omegarealm.core.database.PostgresBootstrap;
 import com.omegarealm.core.lifecycle.AdmissionGuard;
 import com.omegarealm.core.player.paper.PlayerConnectionAdapter;
-import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
+import com.omegarealm.core.scheduler.OmegaScheduler;
+import com.omegarealm.core.scheduler.paper.PaperOmegaScheduler;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.time.Clock;
 import java.time.Duration;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 
@@ -20,7 +20,7 @@ public final class OmegaPlugin extends JavaPlugin {
     private final AtomicBoolean shutdownRequested = new AtomicBoolean();
     private volatile OmegaRuntime runtime;
     private PlayerConnectionAdapter playerConnections;
-    private ScheduledTask connectionReconciliation;
+    private OmegaScheduler scheduler;
 
     @Override
     public void onEnable() {
@@ -30,13 +30,14 @@ public final class OmegaPlugin extends JavaPlugin {
             OmegaConfig config = new ConfigLoader().load(getDataFolder().toPath());
             PostgresBootstrap database = new PostgresBootstrap(config.database(), System::getenv,
                     getLogger(), getClass().getClassLoader());
+            scheduler = new PaperOmegaScheduler(this, getServer().getGlobalRegionScheduler(),
+                    getServer().getAsyncScheduler(), getLogger(), this::schedulingFailed);
             runtime = new OmegaRuntime(config, getLogger(), database,
-                    task -> getServer().getGlobalRegionScheduler().execute(this, task), this::stopServer);
+                    scheduler::global, this::stopServer);
             playerConnections = new PlayerConnectionAdapter(this::state, runtime::players,
                     runtime::failPlayerHandling, getLogger(), Clock.systemUTC());
             getServer().getPluginManager().registerEvents(playerConnections, this);
-            connectionReconciliation = getServer().getAsyncScheduler().runAtFixedRate(this,
-                    task -> playerConnections.reconcile(), 250, 250, TimeUnit.MILLISECONDS);
+            scheduler.repeatAsync(Duration.ofMillis(250), Duration.ofMillis(250), playerConnections::reconcile);
             runtime.start();
         } catch (ConfigException exception) {
             getLogger().severe("Omega Core startup failed: " + exception.getMessage());
@@ -53,8 +54,8 @@ public final class OmegaPlugin extends JavaPlugin {
             stopServer();
         }
 
-        if (connectionReconciliation != null) {
-            connectionReconciliation.cancel();
+        if (scheduler != null) {
+            scheduler.close();
         }
         if (playerConnections != null) {
             playerConnections.close();
@@ -91,5 +92,14 @@ public final class OmegaPlugin extends JavaPlugin {
         getLogger().severe("Stopping the server: Omega Core is unavailable.");
         // Paper's shutdown API signals the server loop to halt; it does not mutate world state.
         getServer().shutdown();
+    }
+
+    private void schedulingFailed() {
+        OmegaRuntime current = runtime;
+        if (current == null) {
+            stopServer();
+        } else {
+            current.failScheduling();
+        }
     }
 }

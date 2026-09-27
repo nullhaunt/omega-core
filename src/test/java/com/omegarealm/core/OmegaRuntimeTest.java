@@ -388,6 +388,26 @@ class OmegaRuntimeTest {
     }
 
     @Test
+    void schedulingFailureAfterReadyClosesAdmissionAndRequestsShutdownOnce() throws Exception {
+        CountingDatabase database = new CountingDatabase();
+        OmegaRuntime runtime = runtime(() -> database);
+        runtime.start();
+        nextCallback().run();
+        assertEquals(RuntimeState.READY, runtime.state());
+
+        runtime.failScheduling();
+        runtime.failScheduling();
+        assertEquals(RuntimeState.FAILED, runtime.state());
+        assertThrows(IllegalStateException.class, runtime::players);
+        assertEquals(0, failures.get());
+        nextCallback().run();
+        assertEquals(1, failures.get());
+        runtime.stop();
+        assertTrue(runtime.awaitStopped(Duration.ofSeconds(2)));
+        assertEquals(1, database.closes.get());
+    }
+
+    @Test
     void schedulerRejectionAfterReadyStillDrainsAndSignalsShutdown() throws Exception {
         CountingDatabase database = new CountingDatabase();
         AtomicInteger scheduling = new AtomicInteger();

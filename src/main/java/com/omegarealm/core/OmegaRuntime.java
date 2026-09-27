@@ -129,6 +129,13 @@ public final class OmegaRuntime {
         fail("Player connection handling is unavailable.", false);
     }
 
+    /**
+     * Platform callback failure closes admission even after startup has completed.
+     */
+    public void failScheduling() {
+        fail("Application scheduling is unavailable.", false);
+    }
+
     private void initialize() {
         try {
             Database initialized = Objects.requireNonNull(bootstrap.initialize(), "initialized database");

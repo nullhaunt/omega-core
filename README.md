@@ -58,7 +58,13 @@ The [player/session gate contract](docs/PLAYER_SESSIONS.md) records ownership, l
 verification. A disposable Paper protocol client verified delayed preparation before world
 entry, chunk delivery and live session recording. Visual-client, proxy, Folia and production
 load behavior remain separate evidence boundaries.
-Commands, authorization and the full gameplay scheduler remain future gates.
+
+`OmegaScheduler` now owns global lifecycle dispatch and asynchronous connection
+reconciliation through Paper. Closing it rejects new work and cancels owned task handles;
+unexpected callback failures close dispatch and request server shutdown. The dedicated
+database worker remains the owner of ordered persistence work. The
+[scheduler contract](docs/SCHEDULER.md) documents cancellation and failure behavior.
+Commands, authorization and entity/region gameplay scheduling remain future gates.
 
 ## Configuration
 
