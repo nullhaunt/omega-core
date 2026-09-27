@@ -85,7 +85,7 @@ An authorized request for the existing role creates neither a revision nor an au
 Use the actual local console, or an authenticated ADMIN/OWNER player:
 
 ```text
-omega role set <uuid> <PLAYER|MODERATOR|ADMIN|OWNER> <reason>
+role set <uuid> <PLAYER|MODERATOR|ADMIN|OWNER> <reason>
 ```
 
 The target must have a persisted player identity; offline targets are supported. UUIDs must
@@ -94,11 +94,19 @@ required. Command execution queues work without blocking a tick thread. The fina
 or player reply reports the committed revision and audit ID. ADMIN can assign PLAYER/MODERATOR;
 OWNER can also assign ADMIN. Only local console can change OWNER. RCON, command blocks,
 delegated execution, self-changes and peer/superior targets cannot grant Omega authority.
+`/help` lists commands visible to the sender; `/help role` explains the role command only to
+authorized staff. The registered namespaced paths `omegacore:role` and `omegacore:help` share
+those checks. The old `/omega role set` form has been retired. Native management roots are
+summarized in ADMIN/OWNER help output.
+
 Authorized staff receive usage guidance for incomplete commands and specific UUID, role and
 reason validation messages. Self-changes explain the local-console requirement; other policy
 denials explain that no role change was made. Command access remains hidden from non-staff.
-If completion is uncertain, inspect audit
-history before retrying. Changes remain durable if shutdown wins after commit.
+Omega replies use `Ω |` with player-side information, success and error colors. An accepted
+role write immediately reports that it was queued; the final reply follows database completion.
+Queue acceptance is not proof of a committed change.
+If completion is uncertain, inspect audit history before retrying. Changes remain durable if
+shutdown wins after commit.
 
 Connected authorization is checked every second on the existing database worker, in batches
 of at most 64 identities with a 2-second refresh-query timeout. Snapshots expire five seconds
@@ -134,8 +142,12 @@ Denied commands and Paper/spark branches are absent from client trees and server
 and fail through Minecraft's unknown/incomplete command parser. Existing vanilla argument types
 are preserved. Execution rechecks exact, fresh connected authority even after parsing. Clickable
 sign command execution is disabled because Paper elevates its native permissions. Authorized
-native invocations log actor UUID and literal command path; role changes retain their durable audit.
-Command arguments/reasons are not copied into invocation logs.
+native management invocations log actor UUID, role, server, canonical command path, category
+and invocation outcome. Role requests log queued and final outcomes under an operation ID,
+linked to the durable mutation audit ID on commit. `MANAGEMENT` and `STAFF` are separate
+operational log categories; no staff commands exist yet in this gate. These log records are
+not transactionally durable command-history rows. Raw arguments/reasons are omitted from them;
+the existing role-change audit remains transactionally durable.
 
 One attachment is owned by each exact connection. Reconciliation observes changes every 250 ms
 and applies them on the captured entity scheduler, then refreshes the client tree. Authority
@@ -153,8 +165,8 @@ This enforcement is installed at server load before runtime bootstrap starts and
 can publish READY. New commands belong in the normal command-registration lifecycle. Other
 Omega plugins must use application authority, not attachments or OP as credentials; arbitrary
 plugins running in the same JVM are trusted code, not sandboxed by this permission boundary.
-Central command organization, username/UUID resolution, general gameplay scheduling, controlled
-shutdown/restart, backup/rollback, production load and Folia remain separate gates.
+Username/UUID resolution, general gameplay scheduling, controlled shutdown/restart,
+universal durable command history, backup/rollback, production load and Folia remain separate gates.
 
 ## Configuration
 

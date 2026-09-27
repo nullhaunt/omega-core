@@ -1,6 +1,7 @@
 package com.omegarealm.core.authorization;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * Explicit native-tool grants. Parent permissions and wildcard grants are deliberately absent.
@@ -32,6 +33,18 @@ public final class NativeCommandCatalog {
 
     public static String root(String label) {
         return label.substring(label.lastIndexOf(':') + 1).toLowerCase(Locale.ROOT);
+    }
+
+    public static String canonicalRoot(String label) {
+        return switch (root(label)) {
+            case "ver", "about" -> "version";
+            case "pl" -> "plugins";
+            default -> root(label);
+        };
+    }
+
+    public static String canonicalBranch(String label, String branch) {
+        return branches(label).getOrDefault(branch, branch);
     }
 
     public static boolean reviewed(String label) {
@@ -70,5 +83,16 @@ public final class NativeCommandCatalog {
         PAPER.values().forEach(command -> result.add("bukkit.command.paper." + command));
         SPARK.values().forEach(command -> result.add("spark." + command));
         return Set.copyOf(result);
+    }
+
+    /**
+     * The same reviewed roots used by the native fence, for the staff help summary.
+     */
+    public static String helpSummary() {
+        Set<String> roots = new TreeSet<>(WORLD);
+        roots.addAll(SIMPLE.keySet());
+        roots.add("paper");
+        roots.add("spark");
+        return roots.stream().map(root -> "/" + root).collect(Collectors.joining(", "));
     }
 }

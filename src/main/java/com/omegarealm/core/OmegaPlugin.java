@@ -2,7 +2,9 @@ package com.omegarealm.core;
 
 import com.omegarealm.core.authorization.paper.NativeCommandFence;
 import com.omegarealm.core.authorization.paper.PlayerPermissionAdapter;
-import com.omegarealm.core.authorization.paper.RoleCommand;
+import com.omegarealm.core.command.paper.CommandAccess;
+import com.omegarealm.core.command.paper.CommandAudit;
+import com.omegarealm.core.command.paper.OmegaCommands;
 import com.omegarealm.core.config.ConfigException;
 import com.omegarealm.core.config.ConfigLoader;
 import com.omegarealm.core.config.OmegaConfig;
@@ -43,7 +45,13 @@ public final class OmegaPlugin extends JavaPlugin {
                     runtime::failPlayerHandling, getLogger(), Clock.systemUTC());
             getServer().getPluginManager().registerEvents(playerConnections, this);
             playerPermissions = new PlayerPermissionAdapter(this, playerConnections::authorization, runtime::failPlayerHandling);
-            nativeCommands = new NativeCommandFence(this, playerPermissions, runtime::failPlayerHandling,
+            CommandAccess commandAccess = new CommandAccess(getServer()::getConsoleSender,
+                    this::state, playerPermissions::authorization);
+            CommandAudit commandAudit = new CommandAudit(getLogger(), config.server().id());
+            OmegaCommands commands = new OmegaCommands(commandAccess, runtime::players,
+                    scheduler, commandAudit, getLogger(), this::schedulingFailed, playerConnections::reply);
+            nativeCommands = new NativeCommandFence(this, playerPermissions, commandAccess,
+                    commandAudit, commands, runtime::failPlayerHandling,
                     () -> state() == RuntimeState.READY, runtime::start);
             getServer().getPluginManager().registerEvents(playerPermissions, this);
             getServer().getPluginManager().registerEvents(nativeCommands, this);
@@ -53,11 +61,14 @@ public final class OmegaPlugin extends JavaPlugin {
             });
             scheduler.repeatAsync(Duration.ofSeconds(1), Duration.ofSeconds(1),
                     () -> scheduler.global(playerPermissions::refreshPlan));
-            RoleCommand roleCommand = new RoleCommand(getServer()::getConsoleSender,
-                    this::state, runtime::players, scheduler, getLogger(), this::schedulingFailed,
-                    playerPermissions::authorization, playerConnections::reply);
-            getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS,
-                    event -> event.registrar().register(roleCommand.node(), "Manage realm-wide player roles"));
+            getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, event -> {
+                try {
+                    commands.register(event.registrar());
+                } catch (RuntimeException | LinkageError unavailable) {
+                    getLogger().severe("Omega command registration failed; stopping the server.");
+                    stopServer();
+                }
+            });
             // ServerLoad installs the native permission boundary before starting critical services.
         } catch (ConfigException exception) {
             getLogger().severe("Omega Core startup failed: " + exception.getMessage());

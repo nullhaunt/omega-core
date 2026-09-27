@@ -198,7 +198,7 @@ Permission changes reconcile every 250 ms on captured entity handles; stale appl
 deny commands, and a five-second application delay requires reconnect. Physical kicks wait
 for the owning context. The existing scheduler owns reconciliation/registry refresh tasks;
 the permission adapter owns attachments. No new executors or configuration keys were added.
-Command organization, username/UUID lookup, controlled shutdown/restart, backup/rollback and
+Username/UUID lookup, controlled shutdown/restart, backup/rollback and
 general gameplay scheduling are deferred slices.
 
 Java 25 checks passed with 269 unit tests and 51 native PostgreSQL tests. Database evidence
@@ -223,6 +223,27 @@ This correction passed 274 unit tests, shaded packaging and a fresh isolated Pap
 check of client message delivery, primary/namespaced paths, unchanged denial audits/revisions,
 role writes, masking, expiry and cleanup. The 51-test database suite above is prior evidence;
 the persistence writer was unchanged. Graphical-client rendering remains unverified.
+
+The command organization gate now registers standalone `/role set` and filtered `/help` through
+`command/paper/OmegaCommands`; `/omega role set` is retired. `CommandCatalog` supplies names,
+descriptions, minimum roles, namespaced variants and help entries. `CommandAccess` uses exact
+sender and fresh connected authority for parsing, help and execution; the native fence consumes
+the registered labels instead of special-casing `/omega`. `CommandMessages` uses `Ω |` for player
+and console feedback. Role changes acknowledge queueing, then reply after worker completion on
+the original console/player context. `CommandAudit` writes filterable `STAFF`/`MANAGEMENT`
+operational events with actor, server, canonical path, outcome and operation ID; committed role
+events link the existing transactional mutation audit. No new pool, timer, schema, or persistent
+command-history table was introduced. Staff-command handlers and durable universal invocation
+history remain later slices. See README for operator syntax and runtime evidence.
+
+Java 25 `test shadowJar --offline --console=plain` passed with 276 unit tests. A fresh
+isolated Paper 26.3 build-49/PostgreSQL run under `build/command-registry-smoke-alias`
+verified `/role`, `/help`, both namespace paths, namespaced help arguments, filtered command
+trees, protocol-client feedback, queued/final replies, native management parsing, OP denial,
+role mutation audits, five-second expiry and clean shutdown. Operational events were checked
+for canonical paths, category, outcome and mutation-audit correlation without raw reasons.
+The prior 51-test database suite was not rerun because this gate changed no writer or schema.
+Graphical-client rendering, live deployment, Folia and production load remain unverified.
 
 The earlier snapshot below records bootstrap evidence only; it is not current feature status.
 
