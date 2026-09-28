@@ -295,6 +295,31 @@ player replies, role/audit writes, expiry and orderly shutdown. The fixture proc
 live deployment, graphical-client rendering, Folia and production load remain unverified.
 See README and `docs/AUTHORIZATION.md` for operator semantics.
 
+The read-only management diagnostics gate registers standalone `/build` and `/status`,
+plus their `omegacore:` labels. Fresh ADMIN/OWNER players and the actual local console
+can use them; lower roles, RCON and delegated execution cannot. `/build` shows the
+version, abbreviated Git revision and readable UTC build time embedded in the shaded
+JAR. Checkout state is not part of the production command. `/status` reads bounded
+in-memory runtime/player-service observations, including the last completed database
+connection and server ID lock check and oldest connected authorization age. It performs
+no SQL or scheduler wait. The database line describes a past successful check, not live
+availability.
+These read-only invocations use the shared operational `MANAGEMENT` log and remain
+available if the durable audit queue is unavailable. No new schema, worker, timer or
+configuration key was added. Java 25 checks passed with 291 unit and 56 native
+PostgreSQL tests. A fresh isolated Paper 26.3 build-49/PostgreSQL fixture under
+`build/management-diagnostics-smoke` verified console and player paths, namespace
+variants, PLAYER masking, ADMIN promotion, client feedback, revocation and clean
+shutdown. The presentation correction grouped fields into one colored player message
+or plain console message, shortened the revision, removed checkout state and rendered
+elapsed times for operators. Java 25 unit tests and shaded packaging passed again;
+the refreshed isolated Paper fixture verified delivery and formatting markers. Its
+processes stopped.
+The database wording was then clarified to show that the retained connection last
+completed a query while holding its server ID lock. Unit and shaded checks cover this
+text change; the earlier Paper run remains transport evidence. Graphical-client
+rendering, live deployment, Folia and production load remain unverified.
+
 The earlier snapshot below records bootstrap evidence only; it is not current feature status.
 
 ## Earlier handoff snapshot — 2026-09-26

@@ -1,8 +1,38 @@
+import java.time.Instant
+
 plugins {
     id("java-library")
     id("io.papermc.paperweight.userdev") version "2.0.0-beta.24"
     id("com.gradleup.shadow") version "9.6.1"
     id("xyz.jpenilla.run-paper") version "3.1.0"
+}
+
+abstract class GenerateBuildIdentity : DefaultTask() {
+    @get:Input abstract val buildVersion: Property<String>
+    @get:Input abstract val commit: Property<String>
+    @get:OutputFile abstract val destination: RegularFileProperty
+
+    @TaskAction
+    fun generate() {
+        val file = destination.get().asFile
+        file.parentFile.mkdirs()
+        file.writeText(
+            "version=${buildVersion.get()}\n" +
+                "commit=${commit.get()}\n" +
+                "built-at=${Instant.now()}\n"
+        )
+    }
+}
+
+val gitCommit = providers.exec {
+    commandLine("git", "rev-parse", "--short=12", "--verify", "HEAD")
+}.standardOutput.asText.map { it.trim() }
+
+val generateBuildIdentity = tasks.register<GenerateBuildIdentity>("generateBuildIdentity") {
+    buildVersion.set(version.toString())
+    commit.set(gitCommit)
+    destination.set(layout.buildDirectory.file("generated/omega-build.properties"))
+    outputs.upToDateWhen { false }
 }
 
 repositories {
@@ -86,6 +116,7 @@ tasks {
     }
 
     processResources {
+        from(generateBuildIdentity)
         val props = mapOf("version" to version, "description" to project.description)
         filesMatching("plugin.yml") {
             expand(props)

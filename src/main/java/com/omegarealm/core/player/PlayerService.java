@@ -8,6 +8,7 @@ import com.omegarealm.core.command.CommandAuditEvent;
 import com.omegarealm.core.command.CommandAuditEvent.Outcome;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
@@ -46,6 +47,8 @@ public final class PlayerService implements PlayerTargetResolver {
     private Work inFlight;
     private boolean ownershipCheckPending;
     private long ownershipCheckSequence;
+    private long ownershipVerifiedAtNanos;
+    private boolean ownershipVerified;
     private ScheduledFuture<?> ownershipPoll;
     private ScheduledFuture<?> ownershipDeadline;
     private ScheduledFuture<?> authorizationPoll;
@@ -96,6 +99,8 @@ public final class PlayerService implements PlayerTargetResolver {
                 return;
             }
             state = State.RUNNING;
+            ownershipVerifiedAtNanos = System.nanoTime();
+            ownershipVerified = true;
             ownershipPoll = deadlines.scheduleWithFixedDelay(this::requestOwnershipCheck,
                     limits.ownershipInterval().toNanos(), limits.ownershipInterval().toNanos(),
                     TimeUnit.NANOSECONDS);
@@ -109,6 +114,48 @@ public final class PlayerService implements PlayerTargetResolver {
     public boolean isRunning() {
         synchronized (ownership) {
             return state == State.RUNNING;
+        }
+    }
+
+    /**
+     * Reads only bounded in-memory state. A committed session is counted until its ordered
+     * close completes, including while a departure is queued.
+     */
+    public PlayerServiceDiagnostics diagnostics() {
+        synchronized (ownership) {
+            long now = System.nanoTime();
+            int connected = 0;
+            int openSessions = 0;
+            int expired = 0;
+            long oldestAuthorizationNanos = -1;
+
+            for (Entry entry : attempts.values()) {
+                if (entry.committed) {
+                    openSessions++;
+                }
+                if (!authorityPhase(entry)) {
+                    continue;
+                }
+
+                connected++;
+                long age = Math.max(0L, now - entry.authorizationVerifiedAt);
+                oldestAuthorizationNanos = Math.max(oldestAuthorizationNanos, age);
+                if (entry.authorization == null || entry.authorizationExpired
+                        || age >= authorizationLimits.freshness().toNanos()) {
+                    expired++;
+                }
+            }
+
+            Optional<Duration> ownershipAge = ownershipVerified
+                    ? Optional.of(Duration.ofNanos(Math.max(0L, now - ownershipVerifiedAtNanos)))
+                    : Optional.empty();
+            Optional<Duration> authorityAge = oldestAuthorizationNanos >= 0
+                    ? Optional.of(Duration.ofNanos(oldestAuthorizationNanos))
+                    : Optional.empty();
+            int pending = mailbox.size() + (inFlight == null ? 0 : 1);
+
+            return new PlayerServiceDiagnostics(state == State.RUNNING, connected, openSessions,
+                    pending, ownershipAge, ownershipCheckPending, authorityAge, expired);
         }
     }
 
@@ -528,6 +575,9 @@ public final class PlayerService implements PlayerTargetResolver {
                 if (checkOwner) {
                     repository.checkOwnership();
                     synchronized (ownership) {
+                        if (state == State.RUNNING) {
+                            ownershipVerifiedAtNanos = System.nanoTime();
+                        }
                         ownershipCheckPending = false;
                         cancel(ownershipDeadline);
                         ownershipDeadline = null;

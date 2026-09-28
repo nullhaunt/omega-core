@@ -85,6 +85,49 @@ class PlayerServiceTest {
     }
 
     @Test
+    void diagnosticsStayNonblockingDuringSessionClosureAndReportOwnedState() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        CountDownLatch closing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        repository.end = () -> {
+            closing.countDown();
+            waitFor(release);
+        };
+
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            PlayerServiceDiagnostics initial = harness.service.diagnostics();
+            assertTrue(initial.running());
+            assertEquals(0, initial.trackedOpenSessions());
+            assertTrue(initial.ownershipVerifiedAgo().isPresent());
+            assertTrue(initial.oldestAuthorizationAge().isEmpty());
+
+            PlayerAttempt player = attempt();
+            await(harness.service.prepare(player));
+            await(harness.service.activate(player.token(), JOINED));
+
+            PlayerServiceDiagnostics active = harness.service.diagnostics();
+            assertEquals(1, active.connectedAttempts());
+            assertEquals(1, active.trackedOpenSessions());
+            assertTrue(active.oldestAuthorizationAge().isPresent());
+            assertEquals(0, active.expiredAuthorizations());
+
+            CompletionStage<Void> departure = harness.service.disconnect(player.token(), JOINED.plusSeconds(1));
+            assertTrue(closing.await(2, TimeUnit.SECONDS));
+            PlayerServiceDiagnostics pending = harness.service.diagnostics();
+            assertEquals(0, pending.connectedAttempts());
+            assertEquals(1, pending.trackedOpenSessions());
+            assertEquals(1, pending.pendingOperations());
+            assertTrue(pending.oldestAuthorizationAge().isEmpty());
+
+            release.countDown();
+            await(departure);
+            assertEquals(0, harness.service.diagnostics().trackedOpenSessions());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
     void targetResolutionRunsOnlyOnTheOwnedWorkerAndSharesTheBoundedQueue() throws Exception {
         FakeRepository repository = new FakeRepository();
         UUID uuid = UUID.randomUUID();

@@ -4,11 +4,13 @@ import com.omegarealm.core.config.OmegaConfig;
 import com.omegarealm.core.database.Database;
 import com.omegarealm.core.database.DatabaseBootstrap;
 import com.omegarealm.core.database.DatabaseException;
+import com.omegarealm.core.diagnostics.RuntimeDiagnostics;
 import com.omegarealm.core.player.*;
 
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.*;
 import java.util.logging.Logger;
 
@@ -29,6 +31,7 @@ public final class OmegaRuntime {
     private final ExecutorService worker;
     private final ScheduledExecutorService startupClock;
     private final CompletableFuture<Void> readiness = new CompletableFuture<>();
+    private final long createdAtNanos = System.nanoTime();
 
     private volatile RuntimeState state = RuntimeState.STARTING;
     private boolean started;
@@ -104,6 +107,23 @@ public final class OmegaRuntime {
 
     public RuntimeState state() {
         return state;
+    }
+
+    /**
+     * Capture runtime ownership first, then read the player service outside that monitor.
+     */
+    public RuntimeDiagnostics diagnostics() {
+        RuntimeState observedState;
+        PlayerService observedPlayers;
+        synchronized (ownership) {
+            observedState = state;
+            observedPlayers = playerService;
+        }
+
+        return new RuntimeDiagnostics(observedState, config.server().id(),
+                config.server().environment(),
+                Duration.ofNanos(Math.max(0L, System.nanoTime() - createdAtNanos)),
+                observedPlayers == null ? Optional.empty() : Optional.of(observedPlayers.diagnostics()));
     }
 
     public CompletionStage<Void> readiness() {

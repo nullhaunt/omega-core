@@ -9,6 +9,7 @@ import com.omegarealm.core.config.ConfigException;
 import com.omegarealm.core.config.ConfigLoader;
 import com.omegarealm.core.config.OmegaConfig;
 import com.omegarealm.core.database.PostgresBootstrap;
+import com.omegarealm.core.diagnostics.BuildIdentity;
 import com.omegarealm.core.lifecycle.AdmissionGuard;
 import com.omegarealm.core.player.paper.PlayerConnectionAdapter;
 import com.omegarealm.core.scheduler.OmegaScheduler;
@@ -48,7 +49,9 @@ public final class OmegaPlugin extends JavaPlugin {
             CommandAccess commandAccess = new CommandAccess(getServer()::getConsoleSender,
                     this::state, playerPermissions::authorization);
             CommandAudit commandAudit = new CommandAudit(getLogger(), config.server().id(), runtime::players);
+            BuildIdentity build = BuildIdentity.load(getClass().getClassLoader());
             OmegaCommands commands = new OmegaCommands(commandAccess, runtime::players,
+                    build, runtime::diagnostics,
                     scheduler, commandAudit, getLogger(), this::schedulingFailed, playerConnections::reply);
             nativeCommands = new NativeCommandFence(this, playerPermissions, commandAccess,
                     commandAudit, commands, runtime::failPlayerHandling,

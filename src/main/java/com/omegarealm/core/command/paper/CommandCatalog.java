@@ -19,10 +19,14 @@ public final class CommandCatalog {
 
     public static final Definition HELP = new Definition("help", "Show available commands", Role.PLAYER,
             null, List.of());
+    public static final Definition BUILD = new Definition("build", "Show the deployed Omega build identity",
+            Role.ADMIN, Category.MANAGEMENT, List.of());
+    public static final Definition STATUS = new Definition("status", "Show Omega runtime observations",
+            Role.ADMIN, Category.MANAGEMENT, List.of());
     public static final Definition ROLE = new Definition("role", "Manage realm-wide player roles", Role.ADMIN,
             Category.MANAGEMENT, List.of());
 
-    private static final List<Definition> DEFINITIONS = List.of(HELP, ROLE);
+    private static final List<Definition> DEFINITIONS = List.of(HELP, BUILD, STATUS, ROLE);
     private static final Map<String, Definition> LABELS = DEFINITIONS.stream()
             .flatMap(definition -> definition.labels().stream().map(label -> Map.entry(label, definition)))
             .collect(Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));
@@ -52,6 +56,9 @@ public final class CommandCatalog {
         String prefix = actor instanceof AuthorizationActor.Player ? "/" : "";
         if (definition == ROLE) {
             return prefix + "role set <username|UUID> <" + availableRoles(actor) + "> <reason...>";
+        }
+        if (definition == BUILD || definition == STATUS) {
+            return prefix + definition.name();
         }
         return prefix + "help [command].";
     }

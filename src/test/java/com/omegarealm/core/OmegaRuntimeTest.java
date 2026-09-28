@@ -73,16 +73,20 @@ class OmegaRuntimeTest {
 
         assertNotSame(caller, initializer.get());
         assertEquals(RuntimeState.STARTING, runtime.state());
+        assertEquals(RuntimeState.STARTING, runtime.diagnostics().state());
+        assertTrue(runtime.diagnostics().players().isPresent());
         assertFalse(runtime.readiness().toCompletableFuture().isDone());
 
         publish.run();
 
         assertEquals(RuntimeState.READY, runtime.state());
+        assertTrue(runtime.diagnostics().players().orElseThrow().running());
         runtime.readiness().toCompletableFuture().get(1, TimeUnit.SECONDS);
         runtime.stop();
         runtime.stop();
         assertTrue(runtime.awaitStopped(Duration.ofSeconds(2)));
         assertEquals(RuntimeState.STOPPED, runtime.state());
+        assertEquals(RuntimeState.STOPPED, runtime.diagnostics().state());
         assertEquals(1, database.closes.get());
         assertNotSame(caller, database.closedOn.get());
         assertEquals(0, failures.get());

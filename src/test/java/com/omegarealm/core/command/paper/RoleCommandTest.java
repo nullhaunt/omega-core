@@ -68,7 +68,7 @@ class RoleCommandTest {
                     "role set " + harness.target, "role set " + harness.target + " ADMIN")) {
                 harness.messages.clear();
                 assertEquals(0, harness.dispatcher.execute(command, source));
-                assertEquals(List.of("Ω | Usage: role set <name-or-UUID> <PLAYER|MODERATOR|ADMIN|OWNER> <reason>."),
+                assertEquals(List.of("Ω | Usage: role set <username|UUID> <PLAYER|MODERATOR|ADMIN|OWNER> <reason...>"),
                         harness.messages);
             }
             assertEquals(0, harness.repository.calls);
@@ -182,7 +182,7 @@ class RoleCommandTest {
             CommandSourceStack source = source(player, player);
             harness.authorities.put(player, new AuthorizationSnapshot(UUID.randomUUID(), Role.ADMIN, 1));
             assertEquals(0, harness.dispatcher.execute("role set", source));
-            assertEquals(List.of("Ω | Usage: /role set <name-or-UUID> <PLAYER|MODERATOR> <reason>."), harness.messages);
+            assertEquals(List.of("Ω | Usage: /role set <username|UUID> <PLAYER|MODERATOR> <reason...>"), harness.messages);
             harness.messages.clear();
             assertEquals(0, harness.dispatcher.execute("role set " + harness.target + " UNKNOWN Staff appointment", source));
             assertEquals(List.of("Ω | Unknown role. Available roles: PLAYER|MODERATOR."), harness.messages);

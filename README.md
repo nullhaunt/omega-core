@@ -104,6 +104,22 @@ authorized staff. The registered namespaced paths `omegacore:role` and `omegacor
 those checks. The old `/omega role set` form has been retired. Native management roots are
 summarized in ADMIN/OWNER help output.
 
+`/build` and `/status` are standalone management diagnostics for fresh ADMIN/OWNER players
+and the actual local console. RCON, delegated execution and lower roles cannot use them;
+`/help` hides them from those players. `/build` reports the shaded artifact's version,
+abbreviated Git revision and build time in UTC. `/status` reports runtime state,
+server/environment, runtime age, tracked connections and open sessions, pending player I/O,
+the age of the last successful database connection and server ID lock check, and the oldest
+connected authorization observation. An uninitialized service or absent observation is
+reported as such. These values come from bounded in-memory state. The command never waits
+for PostgreSQL or performs a live health query. The database line records the last time
+the retained connection completed a query and confirmed the exclusive server ID lock.
+It does not promise current database availability. Each command sends one grouped reply
+with readable times. Player replies color important states; console output remains plain.
+Both commands log an operational `MANAGEMENT` invocation. They remain readable when the
+durable command-audit queue is unavailable because they do not change server state.
+Their namespaced paths are `omegacore:build` and `omegacore:status`.
+
 Authorized staff receive usage guidance for incomplete commands and specific target, role and
 reason validation messages. Missing or ambiguous names have distinct replies. Self-changes
 explain the local-console requirement; other policy denials explain that no role change was

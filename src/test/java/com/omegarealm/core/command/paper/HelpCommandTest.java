@@ -29,22 +29,27 @@ class HelpCommandTest {
             assertEquals(1, harness.dispatcher.execute("help", source));
             assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/help")));
             assertTrue(harness.messages.stream().noneMatch(message -> message.contains("/role")));
+            assertTrue(harness.messages.stream().noneMatch(message -> message.contains("/build")));
+            assertTrue(harness.messages.stream().noneMatch(message -> message.contains("/status")));
             assertThrows(CommandSyntaxException.class, () -> harness.dispatcher.execute("help role", source));
+            assertThrows(CommandSyntaxException.class, () -> harness.dispatcher.execute("help build", source));
             var suggestions = harness.dispatcher.getCompletionSuggestions(harness.dispatcher.parse("help r", source)).get();
             assertTrue(suggestions.isEmpty());
 
             harness.messages.clear();
             harness.authorities.put(player, new AuthorizationSnapshot(UUID.randomUUID(), Role.ADMIN, 2));
             assertEquals(1, harness.dispatcher.execute("help role", source));
-            assertEquals(List.of("Ω | Manage realm-wide player roles: /role set <name-or-UUID> <PLAYER|MODERATOR> <reason>."),
+            assertEquals(List.of("Ω | Manage realm-wide player roles: /role set <username|UUID> <PLAYER|MODERATOR> <reason...>"),
                     harness.messages);
             harness.messages.clear();
             assertEquals(1, harness.dispatcher.execute("help omegacore:role", source));
-            assertEquals(List.of("Ω | Manage realm-wide player roles: /role set <name-or-UUID> <PLAYER|MODERATOR> <reason>."),
+            assertEquals(List.of("Ω | Manage realm-wide player roles: /role set <username|UUID> <PLAYER|MODERATOR> <reason...>"),
                     harness.messages);
             harness.messages.clear();
             assertEquals(1, harness.dispatcher.execute("help", source));
             assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/role")));
+            assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/build")));
+            assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/status")));
             assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/paper")));
             assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/spark")));
         }
