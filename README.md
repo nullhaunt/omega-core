@@ -98,7 +98,9 @@ UUIDs remain the identity used for role writes and audits. Role names
 accept either case; a reason of 1-512 characters is required. Command execution queues
 the target lookup and any resulting role write on the existing I/O worker without blocking
 a tick thread. The immediate reply acknowledges the lookup queue; a successful final reply
-reports the committed revision and audit ID. ADMIN can assign PLAYER/MODERATOR;
+names the player and their new role in plain language. Revision and audit IDs remain in the
+durable audit history; operational logs retain the operation and outcome. Routine command
+feedback omits those internal identifiers. ADMIN can assign PLAYER/MODERATOR;
 OWNER can also assign ADMIN. Only local console can change OWNER. RCON, command blocks,
 delegated execution, self-changes and peer/superior targets cannot grant Omega authority.
 `/help` lists commands visible to the sender; `/help role` explains the role command only to
@@ -128,7 +130,7 @@ reported as such. These values come from bounded in-memory state. The command ne
 for PostgreSQL or performs a live health query. The database line records the last time
 the retained connection completed a query and confirmed the exclusive server ID lock.
 It does not promise current database availability. Each command sends one grouped reply
-with readable times. Player replies color important states; console output remains plain.
+with readable times and labels. Player replies color important states; console output remains plain.
 Both commands log an operational `MANAGEMENT` invocation. They remain readable when the
 durable command-audit queue is unavailable because they do not change server state.
 Their namespaced paths are `omegacore:build` and `omegacore:status`.
@@ -137,9 +139,10 @@ Authorized staff receive usage guidance for incomplete commands and specific tar
 reason validation messages. Missing or ambiguous names have distinct replies. Self-changes
 explain the local-console requirement; other policy denials explain that no role change was
 made. Command access remains hidden from non-staff.
-Omega replies use `Ω |` with player-side information, success and error colors. An accepted
-target lookup immediately reports that it was queued; the final reply follows database completion.
-Lookup queue acceptance is not proof of a committed change.
+Omega replies use `Ω |` with player-side information, success and error colors. Help and
+role outcomes group related lines into one message. An accepted target lookup immediately
+says the player is being checked; the final reply follows database completion. This first
+message is not proof of a committed change.
 If completion is uncertain, inspect audit history before retrying. Changes remain durable if
 shutdown wins after commit.
 

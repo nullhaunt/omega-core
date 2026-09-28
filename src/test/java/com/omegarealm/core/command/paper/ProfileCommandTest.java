@@ -55,19 +55,19 @@ class ProfileCommandTest {
         Harness harness = new Harness();
         assertEquals(0, harness.dispatcher.execute("profile name%", harness.playerSource()));
         assertTrue(harness.requests.isEmpty());
-        assertTrue(harness.messages.getLast().contains("current username or canonical UUID"));
+        assertTrue(harness.messages.getLast().contains("current username or full player ID"));
 
         PlayerTarget missing = new PlayerTarget.ByUsername("Unknown");
         assertEquals(1, harness.dispatcher.execute("profile Unknown", harness.playerSource()));
         harness.complete(missing, PlayerTargetResolution.missing());
         harness.replies.remove().run();
-        assertTrue(harness.messages.getLast().contains("No persisted player"));
+        assertTrue(harness.messages.getLast().contains("couldn't find a saved profile"));
 
         PlayerTarget ambiguous = new PlayerTarget.ByUsername("Duplicated");
         assertEquals(1, harness.dispatcher.execute("profile Duplicated", harness.playerSource()));
         harness.complete(ambiguous, PlayerTargetResolution.ambiguous());
         harness.replies.remove().run();
-        assertTrue(harness.messages.getLast().contains("Use a UUID"));
+        assertTrue(harness.messages.getLast().contains("Use a player ID"));
         assertTrue(harness.presented.isEmpty());
     }
 
@@ -91,7 +91,7 @@ class ProfileCommandTest {
         harness.lookups.get(target).completeExceptionally(new IllegalStateException("database unavailable"));
         harness.replies.remove().run();
 
-        assertTrue(harness.messages.getLast().contains("Profile lookup failed"));
+        assertTrue(harness.messages.getLast().contains("couldn't load that profile"));
         assertFalse(harness.messages.getLast().contains("database unavailable"));
         assertTrue(harness.presented.isEmpty());
     }

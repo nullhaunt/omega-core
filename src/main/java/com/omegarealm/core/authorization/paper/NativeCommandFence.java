@@ -180,7 +180,7 @@ public final class NativeCommandFence implements Listener {
                     null, null, null);
             if (!audit.recordInvocation(event)) {
                 CommandMessages.send(source.getSender(), CommandMessages.Kind.ERROR,
-                        "Command audit is unavailable; this command was not executed.");
+                        "That command couldn't run because the audit log is unavailable.");
                 return false;
             }
         }
@@ -204,7 +204,7 @@ public final class NativeCommandFence implements Listener {
         if (root.equals("op")) {
             event.setCancelled(true);
             CommandMessages.send(event.getSender(), CommandMessages.Kind.ERROR,
-                    "Omega keeps players non-OP. Use realm roles to grant authority.");
+                    "Omega uses roles instead of operator status. Assign a role to grant access.");
         } else if (root.equals("reload") || root.equals("rl")) {
             event.setCancelled(true);
             CommandMessages.send(event.getSender(), CommandMessages.Kind.ERROR,
@@ -216,7 +216,7 @@ public final class NativeCommandFence implements Listener {
             if (!path.matches("[a-z][a-z0-9._-]{0,127}")) {
                 event.setCancelled(true);
                 CommandMessages.send(event.getSender(), CommandMessages.Kind.ERROR,
-                        "Command audit cannot identify this command; it was not executed.");
+                        "That command couldn't run because Omega could not record it safely.");
                 return;
             }
             AuthorizationActor actor = event.getSender() == plugin.getServer().getConsoleSender()
@@ -232,7 +232,7 @@ public final class NativeCommandFence implements Listener {
                 }
                 event.setCancelled(true);
                 CommandMessages.send(event.getSender(), CommandMessages.Kind.ERROR,
-                        "Command audit is unavailable; this command was not executed.");
+                        "That command couldn't run because the audit log is unavailable.");
             }
         }
     }

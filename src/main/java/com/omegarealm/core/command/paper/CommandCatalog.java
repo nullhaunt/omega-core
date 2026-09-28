@@ -17,15 +17,15 @@ public final class CommandCatalog {
 
     public static final String NAMESPACE = "omegacore";
 
-    public static final Definition HELP = new Definition("help", "Show available commands", Role.PLAYER,
+    public static final Definition HELP = new Definition("help", "Find available commands", Role.PLAYER,
             null, List.of(), false);
-    public static final Definition BUILD = new Definition("build", "Show the deployed Omega build identity",
+    public static final Definition BUILD = new Definition("build", "See the Omega version and build time",
             Role.ADMIN, Category.MANAGEMENT, List.of(), false);
-    public static final Definition STATUS = new Definition("status", "Show Omega runtime observations",
+    public static final Definition STATUS = new Definition("status", "Check the server's status",
             Role.ADMIN, Category.MANAGEMENT, List.of(), false);
-    public static final Definition ROLE = new Definition("role", "Manage realm-wide player roles", Role.ADMIN,
+    public static final Definition ROLE = new Definition("role", "Change a player's role", Role.ADMIN,
             Category.MANAGEMENT, List.of(), false);
-    public static final Definition PROFILE = new Definition("profile", "View a player's Omega profile",
+    public static final Definition PROFILE = new Definition("profile", "View a player's profile",
             Role.PLAYER, null, List.of(), true);
 
     private static final List<Definition> DEFINITIONS = List.of(HELP, PROFILE, BUILD, STATUS, ROLE);
@@ -44,9 +44,30 @@ public final class CommandCatalog {
         return LABELS.get(label);
     }
 
-    public static String availableRoles(AuthorizationActor actor) {
-        return Arrays.stream(Role.values()).filter(role -> canAssign(actor, role))
-                .map(Role::name).collect(Collectors.joining("|"));
+    public static String roleName(Role role) {
+        return switch (role) {
+            case PLAYER -> "Player";
+            case MODERATOR -> "Moderator";
+            case ADMIN -> "Admin";
+            case OWNER -> "Owner";
+        };
+    }
+
+    public static String assignableRoleNames(AuthorizationActor actor) {
+        List<String> names = Arrays.stream(Role.values())
+                .filter(role -> canAssign(actor, role))
+                .map(CommandCatalog::roleName)
+                .toList();
+        if (names.isEmpty()) {
+            return "none";
+        }
+        if (names.size() == 1) {
+            return names.getFirst();
+        }
+        if (names.size() == 2) {
+            return names.getFirst() + " or " + names.getLast();
+        }
+        return String.join(", ", names.subList(0, names.size() - 1)) + ", or " + names.getLast();
     }
 
     public static boolean canAssign(AuthorizationActor actor, Role requested) {
@@ -57,15 +78,15 @@ public final class CommandCatalog {
     public static String usage(Definition definition, AuthorizationActor actor) {
         String prefix = actor instanceof AuthorizationActor.Player ? "/" : "";
         if (definition == ROLE) {
-            return prefix + "role set <username|UUID> <" + availableRoles(actor) + "> <reason...>";
+            return prefix + "role set <player> <role> <reason>";
         }
         if (definition == PROFILE) {
-            return prefix + "profile [current-username|UUID]";
+            return prefix + "profile [player]";
         }
         if (definition == BUILD || definition == STATUS) {
             return prefix + definition.name();
         }
-        return prefix + "help [command].";
+        return prefix + "help [command]";
     }
 
     public record Definition(String name, String description, Role minimumRole,

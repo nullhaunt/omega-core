@@ -46,7 +46,7 @@ class DiagnosticsCommandTest {
 
         harness.authorities.put(player, new AuthorizationSnapshot(UUID.randomUUID(), Role.ADMIN, 3));
         assertEquals(1, harness.dispatcher.execute("build", playerSource));
-        assertEquals(List.of("Ω | BUILD\n  Version: 0.1.0-SNAPSHOT\n  Revision: aaaaaaaaaaaa"
+        assertEquals(List.of("Ω | Build information\n  Version: 0.1.0-SNAPSHOT\n  Revision: aaaaaaaaaaaa"
                 + "\n  Built: 2026-09-28 04:00 UTC"), harness.messages);
         assertEquals(NamedTextColor.AQUA, harness.playerComponents.getFirst().color());
 
@@ -54,12 +54,12 @@ class DiagnosticsCommandTest {
         assertEquals(1, harness.dispatcher.execute("status", playerSource));
         assertEquals(1, harness.statusReads.get());
         assertEquals(1, harness.messages.size());
-        assertTrue(harness.messages.getFirst().startsWith("Ω | STATUS\n  State: Ready"));
+        assertTrue(harness.messages.getFirst().startsWith("Ω | Server status\n  State: Ready"));
         assertTrue(harness.messages.getFirst().contains("Uptime: 30s"));
         assertTrue(harness.messages.getFirst().contains(
-                "Database: Last check 2.5s ago: connected, server lock held"));
+                "Database: Last successful check 2.5s ago; server lock confirmed"));
         assertTrue(harness.messages.getFirst().contains(
-                "Authorization: oldest check 4s ago · 1 expired connection"));
+                "Role checks: Oldest check 4s ago · 1 player needs to reconnect"));
         assertTrue(harness.playerComponents.getLast().children().stream()
                 .anyMatch(child -> child instanceof TextComponent text
                         && text.content().equals("Ready") && NamedTextColor.GREEN.equals(text.color())));
@@ -74,7 +74,7 @@ class DiagnosticsCommandTest {
         assertEquals(1, harness.dispatcher.execute("status", harness.source(harness.console, null)));
         assertEquals(2, harness.statusReads.get());
         assertEquals(1, harness.messages.size());
-        assertTrue(harness.messages.getFirst().startsWith("Ω | STATUS\n  State: Ready"));
+        assertTrue(harness.messages.getFirst().startsWith("Ω | Server status\n  State: Ready"));
         assertThrows(CommandSyntaxException.class,
                 () -> harness.dispatcher.execute("status", harness.source(harness.console, player)));
     }

@@ -134,6 +134,10 @@ unrequested systems. Creating this file does not authorize the next implementati
   formatting churn.
 - Keep classes focused, methods understandable, and visibility as narrow as practical.
   Use immutable values for configuration and domain boundaries.
+- Write command replies for people, including console replies. Lead with the outcome, use
+  natural sentences and restrained formatting, and keep internal status codes, revision
+  numbers and audit IDs out of routine confirmations. Retain precise identifiers in audit
+  records and diagnostics where operators need them. Group related lines into one message.
 - Document non-obvious invariants, ownership, and reasons for constraints. Comments
   should explain decisions rather than narrate obvious statements.
 - Make failure paths as deliberate as success paths. Do not swallow exceptions or add

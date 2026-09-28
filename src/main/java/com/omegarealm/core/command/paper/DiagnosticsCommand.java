@@ -103,7 +103,7 @@ final class DiagnosticsCommand {
         audit.record(actor, CommandCatalog.BUILD.category(), "build", Outcome.INVOKED,
                 UUID.randomUUID(), null);
 
-        CommandMessages.sendPanel(context.getSource().getSender(), "BUILD", List.of(
+        CommandMessages.sendPanel(context.getSource().getSender(), "Build information", List.of(
                 CommandMessages.Field.normal("Version", build.version()),
                 CommandMessages.Field.normal("Revision", build.commit()),
                 CommandMessages.Field.normal("Built", BUILD_TIME.format(build.builtAt()))));
@@ -126,7 +126,7 @@ final class DiagnosticsCommand {
         if (snapshot.players().isEmpty()) {
             fields.add(CommandMessages.Field.warning("Player service", "Not initialized"));
             fields.add(CommandMessages.Field.warning("Database", "No completed check yet"));
-            CommandMessages.sendPanel(sender, "STATUS", fields);
+            CommandMessages.sendPanel(sender, "Server status", fields);
             return 1;
         }
 
@@ -137,12 +137,12 @@ final class DiagnosticsCommand {
         fields.add(CommandMessages.Field.normal("Players",
                 players.connectedAttempts() + " connected · "
                         + players.trackedOpenSessions() + " open sessions"));
-        fields.add(CommandMessages.Field.normal("Pending I/O",
+        fields.add(CommandMessages.Field.normal("Pending player work",
                 Integer.toString(players.pendingOperations())));
 
         String ownership = players.ownershipVerifiedAgo()
                 .map(DiagnosticsCommand::observationAge)
-                .map(value -> "Last check " + value + " ago: connected, server lock held")
+                .map(value -> "Last successful check " + value + " ago; server lock confirmed")
                 .orElse("No completed check yet");
         if (players.ownershipCheckPending()) {
             ownership += " · new check pending";
@@ -153,15 +153,15 @@ final class DiagnosticsCommand {
 
         String authorization = players.oldestAuthorizationAge()
                 .map(DiagnosticsCommand::observationAge)
-                .map(value -> "oldest check " + value + " ago")
+                .map(value -> "Oldest check " + value + " ago")
                 .orElse("No connected observations");
         int expired = players.expiredAuthorizations();
-        authorization += " · " + expired + (expired == 1 ? " expired connection" : " expired connections");
+        authorization += " · " + expired + (expired == 1 ? " player needs to reconnect" : " players need to reconnect");
         fields.add(expired == 0
-                ? CommandMessages.Field.normal("Authorization", authorization)
-                : CommandMessages.Field.warning("Authorization", authorization));
+                ? CommandMessages.Field.normal("Role checks", authorization)
+                : CommandMessages.Field.warning("Role checks", authorization));
 
-        CommandMessages.sendPanel(sender, "STATUS", fields);
+        CommandMessages.sendPanel(sender, "Server status", fields);
         return 1;
     }
 }

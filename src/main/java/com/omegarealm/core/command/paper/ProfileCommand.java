@@ -71,7 +71,7 @@ final class ProfileCommand {
             target = PlayerTarget.parse(StringArgumentType.getString(context, "target"));
         } catch (IllegalArgumentException invalid) {
             CommandMessages.send(viewer, CommandMessages.Kind.ERROR,
-                    "Use a current username or canonical UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).");
+                    "Enter a current username or full player ID (UUID).");
             return 0;
         }
         return lookup(viewer, target);
@@ -96,17 +96,17 @@ final class ProfileCommand {
     private void finish(Player viewer, PlayerTargetResolution resolution, Throwable failure) {
         if (failure != null) {
             CommandMessages.send(viewer, CommandMessages.Kind.ERROR,
-                    "Profile lookup failed; please try again.");
+                    "We couldn't load that profile right now. Please try again.");
             return;
         }
         if (resolution.status() == PlayerTargetResolution.Status.NOT_FOUND) {
             CommandMessages.send(viewer, CommandMessages.Kind.ERROR,
-                    "No persisted player has that current name or UUID.");
+                    "We couldn't find a saved profile for that name or player ID.");
             return;
         }
         if (resolution.status() == PlayerTargetResolution.Status.AMBIGUOUS) {
             CommandMessages.send(viewer, CommandMessages.Kind.ERROR,
-                    "Multiple players have that stored name. Use a UUID.");
+                    "More than one player has that name. Use a player ID (UUID).");
             return;
         }
 

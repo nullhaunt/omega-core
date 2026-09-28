@@ -11,6 +11,8 @@ import com.omegarealm.core.authorization.Role;
 import io.papermc.paper.command.brigadier.CommandSourceStack;
 import io.papermc.paper.command.brigadier.Commands;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -43,21 +45,19 @@ final class HelpCommand {
     }
 
     private int list(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
-        access.require(CommandCatalog.HELP, context);
+        AuthorizationActor actor = access.require(CommandCatalog.HELP, context);
         var sender = context.getSource().getSender();
-        CommandMessages.send(sender, CommandMessages.Kind.INFO, "Available commands:");
+        List<CommandMessages.Field> fields = new ArrayList<>();
         for (CommandCatalog.Definition definition : CommandCatalog.definitions()) {
             if (access.allows(definition, context.getSource())) {
-                CommandMessages.send(sender, CommandMessages.Kind.INFO,
-                        "/" + definition.name() + " — " + definition.description() + ".");
+                fields.add(CommandMessages.Field.normal("/" + definition.name(), definition.description()));
             }
         }
-        AuthorizationActor actor = access.require(CommandCatalog.HELP, context);
         if (actor instanceof AuthorizationActor.LocalConsole
                 || actor instanceof AuthorizationActor.Player player && player.role().includes(Role.ADMIN)) {
-            CommandMessages.send(sender, CommandMessages.Kind.INFO,
-                    "Native management tools: " + NativeCommandCatalog.helpSummary() + ".");
+            fields.add(CommandMessages.Field.normal("Server tools", NativeCommandCatalog.helpSummary()));
         }
+        CommandMessages.sendPanel(sender, "Available commands", fields);
         return 1;
     }
 
@@ -70,8 +70,16 @@ final class HelpCommand {
             reader.setCursor(context.getNodes().getLast().getRange().getStart());
             throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument().createWithContext(reader);
         }
-        CommandMessages.send(context.getSource().getSender(), CommandMessages.Kind.INFO,
-                definition.description() + ": " + CommandCatalog.usage(definition, actor));
+        List<CommandMessages.Field> fields = new ArrayList<>();
+        fields.add(CommandMessages.Field.normal("Command", CommandCatalog.usage(definition, actor)));
+        if (definition == CommandCatalog.ROLE) {
+            fields.add(CommandMessages.Field.normal("Roles you can assign",
+                    CommandCatalog.assignableRoleNames(actor)));
+        } else if (definition == CommandCatalog.PROFILE) {
+            fields.add(CommandMessages.Field.normal("Finding players",
+                    "Online names are suggested. Use a current name or player ID for offline players."));
+        }
+        CommandMessages.sendPanel(context.getSource().getSender(), definition.description(), fields);
         return 1;
     }
 }

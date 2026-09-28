@@ -19,15 +19,26 @@ public final class CommandMessages {
 
     public static void send(CommandSender sender, Kind kind, String message) {
         if (sender instanceof Player) {
-            NamedTextColor color = switch (kind) {
-                case INFO -> NamedTextColor.GRAY;
-                case SUCCESS -> NamedTextColor.GREEN;
-                case ERROR -> NamedTextColor.RED;
-            };
-            sender.sendMessage(prefix().append(Component.text(message, color)));
+            sender.sendMessage(prefix().append(Component.text(message, kind.color)));
         } else {
             sender.sendPlainMessage("Ω | " + message);
         }
+    }
+
+    static void sendNotice(CommandSender sender, Kind kind, String title, String detail) {
+        Objects.requireNonNull(sender, "sender");
+        Objects.requireNonNull(title, "title");
+        Objects.requireNonNull(detail, "detail");
+
+        if (sender instanceof Player) {
+            Component notice = prefix()
+                    .append(Component.text(title, kind.color).decorate(TextDecoration.BOLD))
+                    .append(Component.text("\n  " + detail, NamedTextColor.WHITE));
+            sender.sendMessage(notice);
+            return;
+        }
+
+        sender.sendPlainMessage("Ω | " + title + "\n  " + detail);
     }
 
     static void sendPanel(CommandSender sender, String title, List<Field> fields) {
@@ -73,7 +84,15 @@ public final class CommandMessages {
     }
 
     public enum Kind {
-        INFO, SUCCESS, ERROR
+        INFO(NamedTextColor.GRAY),
+        SUCCESS(NamedTextColor.GREEN),
+        ERROR(NamedTextColor.RED);
+
+        private final NamedTextColor color;
+
+        Kind(NamedTextColor color) {
+            this.color = color;
+        }
     }
 
     record Field(String label, String value, Tone tone) {
