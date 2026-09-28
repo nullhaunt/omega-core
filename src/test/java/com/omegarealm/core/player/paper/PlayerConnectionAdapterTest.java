@@ -31,6 +31,8 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -41,6 +43,54 @@ class PlayerConnectionAdapterTest {
     private static <T> T proxy(Class<T> type, java.util.function.Function<String, Object> values) {
         return type.cast(Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type},
                 (proxy, method, args) -> values.apply(method.getName())));
+    }
+
+    @Test
+    void debugControlsSanitizedConnectionTimings() throws Exception {
+        try (Harness quiet = new Harness()) {
+            quiet.configure(new Connection(1000, UUID.randomUUID()));
+            assertTrue(quiet.messages.stream().noneMatch(message -> message.startsWith("Omega connection timing:")));
+        }
+
+        try (Harness diagnostic = new Harness(true)) {
+            Connection connection = new Connection(1001, UUID.randomUUID());
+            diagnostic.configure(connection);
+            diagnostic.barrier();
+
+            List<String> timings = diagnostic.messages.stream()
+                    .filter(message -> message.startsWith("Omega connection timing:"))
+                    .toList();
+            assertEquals(2, timings.size());
+            assertTrue(timings.stream().anyMatch(message -> message.matches(
+                    "Omega connection timing: stage=preparation, queue-ms=\\d+\\.\\d{3}, "
+                            + "database-ms=\\d+\\.\\d{3}, outcome=prepared\\.")));
+            assertTrue(timings.stream().anyMatch(message -> message.matches(
+                    "Omega connection timing: stage=configuration, wait-ms=\\d+\\.\\d{3}, "
+                            + "outcome=prepared\\.")));
+            assertTrue(timings.stream().noneMatch(message -> message.contains(connection.uuid.toString())
+                    || message.contains("Player") || message.contains("127.0.0.1")));
+        }
+    }
+
+    @Test
+    void debugLabelsDisconnectedConfigurationWithoutPublishingPreparation() throws Exception {
+        try (Harness harness = new Harness(true)) {
+            Connection connection = new Connection(1000, UUID.randomUUID());
+            harness.repository.blockRead = true;
+            Future<?> configuring = harness.configureAsync(connection);
+            assertTrue(harness.repository.entered.await(2, TimeUnit.SECONDS));
+
+            connection.connected.set(false);
+            configuring.get(2, TimeUnit.SECONDS);
+            assertTrue(harness.messages.stream().anyMatch(message -> message.contains(
+                    "stage=configuration") && message.contains("outcome=cancelled")));
+
+            harness.repository.release.countDown();
+            harness.barrier();
+            assertTrue(harness.messages.stream().anyMatch(message -> message.contains(
+                    "stage=preparation") && message.contains("outcome=discarded")));
+            assertFalse(harness.validate(connection, null).isAllowed());
+        }
     }
 
     @Test
@@ -326,27 +376,51 @@ class PlayerConnectionAdapterTest {
         private final ScheduledThreadPoolExecutor clock = new ScheduledThreadPoolExecutor(1);
         private final AtomicReference<RuntimeState> state = new AtomicReference<>(RuntimeState.READY);
         private final AtomicInteger failures = new AtomicInteger();
+        private final List<String> messages = new CopyOnWriteArrayList<>();
         private final Repository repository = new Repository();
         private final PlayerService service;
         private final PlayerConnectionAdapter adapter;
 
         private Harness() throws Exception {
-            this(AuthorizationRefreshLimits.DEFAULT);
+            this(AuthorizationRefreshLimits.DEFAULT, false);
+        }
+
+        private Harness(boolean debug) throws Exception {
+            this(AuthorizationRefreshLimits.DEFAULT, debug);
         }
 
         private Harness(AuthorizationRefreshLimits refreshLimits) throws Exception {
+            this(refreshLimits, false);
+        }
+
+        private Harness(AuthorizationRefreshLimits refreshLimits, boolean debug) throws Exception {
             Logger logger = Logger.getAnonymousLogger();
             logger.setUseParentHandlers(false);
+            logger.addHandler(new Handler() {
+                @Override
+                public void publish(LogRecord record) {
+                    messages.add(record.getMessage());
+                }
+
+                @Override
+                public void flush() {
+                }
+
+                @Override
+                public void close() {
+                }
+            });
             clock.setRemoveOnCancelPolicy(true);
             service = io.submit(() -> {
                 PlayerService initialized = new PlayerService(repository, io, clock,
-                        ignored -> failures.incrementAndGet(), logger, Clock.systemUTC(), PlayerServiceLimits.DEFAULT, refreshLimits);
+                        ignored -> failures.incrementAndGet(), logger, Clock.systemUTC(),
+                        PlayerServiceLimits.DEFAULT, refreshLimits, debug);
                 initialized.startOnWorker();
                 return initialized;
             }).get(2, TimeUnit.SECONDS);
             adapter = new PlayerConnectionAdapter(proxy(org.bukkit.plugin.Plugin.class, method -> null),
                     state::get, () -> service, failures::incrementAndGet,
-                    logger, Clock.systemUTC());
+                    logger, Clock.systemUTC(), debug);
         }
 
         private Future<?> configureAsync(Connection connection) {

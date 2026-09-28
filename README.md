@@ -233,9 +233,16 @@ Changes require a server restart; application hot reload is not supported.
   underscores, starting with a letter or underscore. Store only the name here.
 - `database.pool-size`: positive YAML integer, at most 2147483647. The default is 5;
   keep it small and tune based on measurements.
-- `debug`: YAML boolean. Enables controlled startup stages, elapsed timings and migration
-  progress. Known failure reasons and migration versions are reported even with debug off.
-  Debug never enables raw SQL, credentials or third-party exception logging.
+- `debug`: YAML boolean. Enables controlled startup stages, elapsed timings, migration
+  progress and connection-preparation timings. Each accepted load reports its mailbox
+  queue wait and repository transaction duration; the async Paper configuration handler
+  reports how long it waited for preparation. Times are monotonic milliseconds with three
+  decimal places. The repository duration includes the ownership check, profile/role read
+  and commit. These lines contain only stage, duration and controlled outcome, not player
+  identity or connection address. They begin after Minecraft online authentication, so
+  they cannot time Mojang's session service. Known failure reasons and migration versions
+  are reported even with debug off. Debug never enables raw SQL, credentials or third-party
+  exception logging.
 
 For a diagnostic pass, set `debug: true` in the operator configuration and restart using
 the rebuilt shaded JAR. Check the reported startup stage, SQLSTATE, migration reason and

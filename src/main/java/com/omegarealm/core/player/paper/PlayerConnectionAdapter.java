@@ -48,16 +48,23 @@ public final class PlayerConnectionAdapter implements Listener, AutoCloseable {
     private final Supplier<PlayerService> players;
     private final Runnable criticalFailure;
     private final Logger logger;
+    private final ConnectionTimings connectionTimings;
     private final Clock time;
     private final Plugin plugin;
     private boolean closed;
 
     public PlayerConnectionAdapter(Plugin plugin, Supplier<RuntimeState> state, Supplier<PlayerService> players,
                                    Runnable criticalFailure, Logger logger, Clock time) {
+        this(plugin, state, players, criticalFailure, logger, time, false);
+    }
+
+    public PlayerConnectionAdapter(Plugin plugin, Supplier<RuntimeState> state, Supplier<PlayerService> players,
+                                   Runnable criticalFailure, Logger logger, Clock time, boolean debug) {
         this.state = Objects.requireNonNull(state, "state");
         this.players = Objects.requireNonNull(players, "players");
         this.criticalFailure = Objects.requireNonNull(criticalFailure, "criticalFailure");
         this.logger = Objects.requireNonNull(logger, "logger");
+        this.connectionTimings = new ConnectionTimings(logger, debug);
         this.time = Objects.requireNonNull(time, "time");
         this.plugin = Objects.requireNonNull(plugin, "plugin");
     }
@@ -110,6 +117,8 @@ public final class PlayerConnectionAdapter implements Listener, AutoCloseable {
         }
 
         Attempt attempt = null;
+        long waitingSince = 0L;
+        ConnectionTimings.Outcome outcome = ConnectionTimings.Outcome.FAILED;
         try {
             // A rapid reconnect can reuse a raw endpoint before the periodic sweep runs.
             reconcile();
@@ -145,37 +154,46 @@ public final class PlayerConnectionAdapter implements Listener, AutoCloseable {
                 }
             }
 
+            if (connectionTimings.enabled()) {
+                waitingSince = System.nanoTime();
+            }
             CompletableFuture<PreparedPlayer> loading = service.prepare(attempt.attempt).toCompletableFuture();
             if (!isCurrent(attempt)) {
                 cancel(attempt);
+                outcome = ConnectionTimings.Outcome.CANCELLED;
                 return;
             }
-            awaitPreparation(attempt, loading);
+            outcome = awaitPreparation(attempt, loading);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             if (attempt != null) {
                 reject(attempt, RETRY);
             }
+            outcome = ConnectionTimings.Outcome.CANCELLED;
         } catch (RuntimeException failure) {
             if (attempt != null) {
                 reject(attempt, UNAVAILABLE);
             }
             failAdapter();
+        } finally {
+            if (connectionTimings.enabled() && waitingSince != 0L) {
+                connectionTimings.configuration(System.nanoTime() - waitingSince, outcome);
+            }
         }
     }
 
-    private void awaitPreparation(Attempt attempt, CompletableFuture<PreparedPlayer> loading)
+    private ConnectionTimings.Outcome awaitPreparation(Attempt attempt, CompletableFuture<PreparedPlayer> loading)
             throws InterruptedException {
         long deadline = System.nanoTime() + PlayerServiceLimits.DEFAULT.loadTimeout().toNanos();
         while (isCurrent(attempt) && state.get() == RuntimeState.READY && attempt.connection.isConnected()) {
             long remaining = deadline - System.nanoTime();
             if (remaining <= 0) {
                 reject(attempt, RETRY);
-                return;
+                return ConnectionTimings.Outcome.TIMED_OUT;
             }
             try {
                 loading.get(Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(100)), TimeUnit.NANOSECONDS);
-                return;
+                return ConnectionTimings.Outcome.PREPARED;
             } catch (TimeoutException stillLoading) {
                 // Poll the exact connection so a disconnect releases the attempt promptly.
             } catch (ExecutionException failure) {
@@ -189,11 +207,21 @@ public final class PlayerConnectionAdapter implements Listener, AutoCloseable {
                     };
                 }
                 reject(attempt, message);
-                return;
+                if (failure.getCause() instanceof PlayerOperationException operation) {
+                    return switch (operation.kind()) {
+                        case BUSY -> ConnectionTimings.Outcome.BUSY;
+                        case DUPLICATE -> ConnectionTimings.Outcome.DUPLICATE;
+                        case TIMED_OUT -> ConnectionTimings.Outcome.TIMED_OUT;
+                        case CANCELLED, NOT_PREPARED -> ConnectionTimings.Outcome.CANCELLED;
+                        case UNAVAILABLE -> ConnectionTimings.Outcome.UNAVAILABLE;
+                    };
+                }
+                return ConnectionTimings.Outcome.FAILED;
             }
         }
         remove(attempt);
         cancel(attempt);
+        return ConnectionTimings.Outcome.CANCELLED;
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)

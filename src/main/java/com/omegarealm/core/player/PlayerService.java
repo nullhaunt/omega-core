@@ -32,6 +32,7 @@ public final class PlayerService implements PlayerTargetResolver {
     private final ScheduledExecutorService deadlines;
     private final Consumer<String> criticalFailure;
     private final Logger logger;
+    private final ConnectionTimings connectionTimings;
     private final Clock time;
     private final PlayerServiceLimits limits;
     private final AuthorizationRefreshLimits authorizationLimits;
@@ -68,13 +69,29 @@ public final class PlayerService implements PlayerTargetResolver {
 
     public PlayerService(PlayerSessionRepository repository, Executor worker,
                          ScheduledExecutorService deadlines, Consumer<String> criticalFailure,
+                         Logger logger, Clock time, PlayerServiceLimits limits, boolean debug) {
+        this(repository, worker, deadlines, criticalFailure, logger, time, limits,
+                AuthorizationRefreshLimits.DEFAULT, debug);
+    }
+
+    public PlayerService(PlayerSessionRepository repository, Executor worker,
+                         ScheduledExecutorService deadlines, Consumer<String> criticalFailure,
                          Logger logger, Clock time, PlayerServiceLimits limits,
                          AuthorizationRefreshLimits authorizationLimits) {
+        this(repository, worker, deadlines, criticalFailure, logger, time, limits,
+                authorizationLimits, false);
+    }
+
+    public PlayerService(PlayerSessionRepository repository, Executor worker,
+                         ScheduledExecutorService deadlines, Consumer<String> criticalFailure,
+                         Logger logger, Clock time, PlayerServiceLimits limits,
+                         AuthorizationRefreshLimits authorizationLimits, boolean debug) {
         this.repository = Objects.requireNonNull(repository, "repository");
         this.worker = Objects.requireNonNull(worker, "worker");
         this.deadlines = Objects.requireNonNull(deadlines, "deadlines");
         this.criticalFailure = Objects.requireNonNull(criticalFailure, "criticalFailure");
         this.logger = Objects.requireNonNull(logger, "logger");
+        this.connectionTimings = new ConnectionTimings(logger, debug);
         this.time = Objects.requireNonNull(time, "time");
         this.limits = Objects.requireNonNull(limits, "limits");
         this.authorizationLimits = Objects.requireNonNull(authorizationLimits, "authorizationLimits");
@@ -304,6 +321,9 @@ public final class PlayerService implements PlayerTargetResolver {
                         limits.loadTimeout().toNanos(), TimeUnit.NANOSECONDS);
                 attempts.put(attempt.token(), entry);
                 currentPlayers.put(attempt.identity().uuid(), entry);
+                if (connectionTimings.enabled()) {
+                    entry.queuedAtNanos = System.nanoTime();
+                }
                 mailbox.addLast(new Work(entry, Operation.LOAD));
             }
         } catch (RejectedExecutionException unavailableClock) {
@@ -610,36 +630,58 @@ public final class PlayerService implements PlayerTargetResolver {
     }
 
     private void load(Entry entry) throws PersistenceException {
-        synchronized (ownership) {
-            if (entry.phase != Phase.LOADING) {
-                return;
+        long queueNanos = connectionTimings.enabled()
+                ? System.nanoTime() - entry.queuedAtNanos : 0L;
+        long databaseNanos = 0L;
+        ConnectionTimings.Outcome outcome = ConnectionTimings.Outcome.FAILED;
+
+        try {
+            synchronized (ownership) {
+                if (entry.phase != Phase.LOADING) {
+                    outcome = ConnectionTimings.Outcome.CANCELLED;
+                    return;
+                }
             }
-        }
-        long verifiedAt = System.nanoTime();
-        LoadedPlayer loaded = repository.loadPlayer(entry.attempt.identity().uuid());
-        PreparedPlayer prepared = new PreparedPlayer(entry.attempt, loaded.storedProfile(), loaded.authorization());
-        boolean expired;
-        synchronized (ownership) {
-            if (state != State.RUNNING || entry.phase != Phase.LOADING) {
-                return;
+
+            long verifiedAt = System.nanoTime();
+            LoadedPlayer loaded;
+            try {
+                loaded = repository.loadPlayer(entry.attempt.identity().uuid());
+            } finally {
+                if (connectionTimings.enabled()) {
+                    databaseNanos = System.nanoTime() - verifiedAt;
+                }
             }
-            cancel(entry.deadline);
-            expired = System.nanoTime() - verifiedAt >= authorizationLimits.freshness().toNanos();
+
+            PreparedPlayer prepared = new PreparedPlayer(entry.attempt, loaded.storedProfile(), loaded.authorization());
+            boolean expired;
+            synchronized (ownership) {
+                if (state != State.RUNNING || entry.phase != Phase.LOADING) {
+                    outcome = ConnectionTimings.Outcome.DISCARDED;
+                    return;
+                }
+                cancel(entry.deadline);
+                expired = System.nanoTime() - verifiedAt >= authorizationLimits.freshness().toNanos();
+                if (expired) {
+                    invalidate(entry);
+                } else {
+                    entry.authorization = prepared.authorization();
+                    entry.persisted = loaded.storedProfile().isPresent();
+                    entry.phase = Phase.PREPARED;
+                    renewAuthorization(entry, verifiedAt);
+                    entry.deadline = deadlines.schedule(() -> expire(entry, Phase.PREPARED),
+                            limits.preparedTimeout().toNanos(), TimeUnit.NANOSECONDS);
+                }
+            }
             if (expired) {
-                invalidate(entry);
+                outcome = ConnectionTimings.Outcome.EXPIRED;
+                entry.preparation.completeExceptionally(new PlayerOperationException(Kind.TIMED_OUT));
             } else {
-                entry.authorization = prepared.authorization();
-                entry.persisted = loaded.storedProfile().isPresent();
-                entry.phase = Phase.PREPARED;
-                renewAuthorization(entry, verifiedAt);
-                entry.deadline = deadlines.schedule(() -> expire(entry, Phase.PREPARED),
-                        limits.preparedTimeout().toNanos(), TimeUnit.NANOSECONDS);
+                outcome = ConnectionTimings.Outcome.PREPARED;
+                entry.preparation.complete(prepared);
             }
-        }
-        if (expired) {
-            entry.preparation.completeExceptionally(new PlayerOperationException(Kind.TIMED_OUT));
-        } else {
-            entry.preparation.complete(prepared);
+        } finally {
+            connectionTimings.preparation(queueNanos, databaseNanos, outcome);
         }
     }
 
@@ -1009,6 +1051,7 @@ public final class PlayerService implements PlayerTargetResolver {
         private final CompletableFuture<PreparedPlayer> preparation = new CompletableFuture<>();
         private final CompletableFuture<PlayerProfile> activation = new CompletableFuture<>();
         private final CompletableFuture<Void> departure = new CompletableFuture<>();
+        private long queuedAtNanos;
         private Phase phase = Phase.LOADING;
         private AuthorizationSnapshot authorization;
         private boolean authorizationExpired;

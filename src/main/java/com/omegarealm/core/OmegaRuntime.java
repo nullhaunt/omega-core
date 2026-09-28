@@ -175,7 +175,7 @@ public final class OmegaRuntime {
 
             PlayerService initializedPlayers = new PlayerService(
                     repositories.acquire(initialized, config.server().id()), worker, startupClock,
-                    message -> fail(message, false), logger, Clock.systemUTC(), playerLimits);
+                    message -> fail(message, false), logger, Clock.systemUTC(), playerLimits, config.debug());
             synchronized (ownership) {
                 accepted = state == RuntimeState.STARTING;
                 if (accepted) {

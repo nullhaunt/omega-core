@@ -43,7 +43,7 @@ public final class OmegaPlugin extends JavaPlugin {
             runtime = new OmegaRuntime(config, getLogger(), database,
                     scheduler::global, this::stopServer);
             playerConnections = new PlayerConnectionAdapter(this, this::state, runtime::players,
-                    runtime::failPlayerHandling, getLogger(), Clock.systemUTC());
+                    runtime::failPlayerHandling, getLogger(), Clock.systemUTC(), config.debug());
             getServer().getPluginManager().registerEvents(playerConnections, this);
             playerPermissions = new PlayerPermissionAdapter(this, playerConnections::authorization, runtime::failPlayerHandling);
             CommandAccess commandAccess = new CommandAccess(getServer()::getConsoleSender,
