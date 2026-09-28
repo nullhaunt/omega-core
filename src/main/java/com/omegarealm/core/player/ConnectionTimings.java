@@ -12,6 +12,7 @@ public final class ConnectionTimings {
 
     private final Logger logger;
     private final boolean enabled;
+
     public ConnectionTimings(Logger logger, boolean enabled) {
         this.logger = Objects.requireNonNull(logger, "logger");
         this.enabled = enabled;

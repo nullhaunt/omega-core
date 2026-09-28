@@ -92,7 +92,9 @@ The target must have a persisted player identity; offline targets are supported.
 matches the player's current stored username exactly, ignoring ASCII case. Old names,
 partial names and players who have never joined do not resolve. If more than one UUID has
 the same stored name, use a canonical UUID; Omega will not guess. No external identity
-service is queried. UUIDs remain the identity used for role writes and audits. Role names
+service is queried. Online names are suggested as the target is typed; offline names and
+UUIDs can still be entered directly. Suggestions do not bypass the persisted lookup.
+UUIDs remain the identity used for role writes and audits. Role names
 accept either case; a reason of 1-512 characters is required. Command execution queues
 the target lookup and any resulting role write on the existing I/O worker without blocking
 a tick thread. The immediate reply acknowledges the lookup queue; a successful final reply
@@ -103,6 +105,17 @@ delegated execution, self-changes and peer/superior targets cannot grant Omega a
 authorized staff. The registered namespaced paths `omegacore:role` and `omegacore:help` share
 those checks. The old `/omega role set` form has been retired. Native management roots are
 summarized in ADMIN/OWNER help output.
+
+Connected players can use `/profile` for their own read-only profile or
+`/profile <current-username|UUID>` for a persisted player. The dialog currently shows the
+stored username and first successful join date in UTC; it does not invent Realm, Frontier,
+Slayer or achievement data. Lookup uses the existing bounded player worker and never blocks
+the command thread. A missing or ambiguous name opens no dialog. Current names include the
+default Floodgate prefix, such as `.Unreference`; Java and Bedrock identities remain separate
+unless an explicit account-linking feature is added. The same Paper dialog is sent to Java
+and translated by Geyser for Bedrock. `omegacore:profile` is the namespaced path; local
+console and delegated senders cannot open a profile dialog. Online names appear as target
+suggestions; offline current names and UUIDs remain valid when entered directly.
 
 `/build` and `/status` are standalone management diagnostics for fresh ADMIN/OWNER players
 and the actual local console. RCON, delegated execution and lower roles cannot use them;

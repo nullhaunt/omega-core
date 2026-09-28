@@ -28,11 +28,16 @@ class HelpCommandTest {
             harness.authorities.put(player, new AuthorizationSnapshot(UUID.randomUUID(), Role.PLAYER, 1));
             assertEquals(1, harness.dispatcher.execute("help", source));
             assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/help")));
+            assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/profile")));
             assertTrue(harness.messages.stream().noneMatch(message -> message.contains("/role")));
             assertTrue(harness.messages.stream().noneMatch(message -> message.contains("/build")));
             assertTrue(harness.messages.stream().noneMatch(message -> message.contains("/status")));
             assertThrows(CommandSyntaxException.class, () -> harness.dispatcher.execute("help role", source));
             assertThrows(CommandSyntaxException.class, () -> harness.dispatcher.execute("help build", source));
+            harness.messages.clear();
+            assertEquals(1, harness.dispatcher.execute("help profile", source));
+            assertEquals(List.of("Ω | View a player's Omega profile: /profile [current-username|UUID]"),
+                    harness.messages);
             var suggestions = harness.dispatcher.getCompletionSuggestions(harness.dispatcher.parse("help r", source)).get();
             assertTrue(suggestions.isEmpty());
 
@@ -52,6 +57,10 @@ class HelpCommandTest {
             assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/status")));
             assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/paper")));
             assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/spark")));
+
+            harness.messages.clear();
+            assertEquals(1, harness.dispatcher.execute("help", harness.source(harness.console, null)));
+            assertTrue(harness.messages.stream().noneMatch(message -> message.contains("/profile")));
         }
     }
 
@@ -76,6 +85,10 @@ class HelpCommandTest {
         private final ConsoleCommandSender console = (ConsoleCommandSender) Proxy.newProxyInstance(
                 ConsoleCommandSender.class.getClassLoader(), new Class<?>[]{ConsoleCommandSender.class},
                 (object, method, arguments) -> {
+                    if (method.getName().equals("sendPlainMessage")) {
+                        messages.add((String) arguments[0]);
+                        return null;
+                    }
                     throw new AssertionError(method.getName());
                 });
         private final CommandDispatcher<CommandSourceStack> dispatcher = new CommandDispatcher<>();

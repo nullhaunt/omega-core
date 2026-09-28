@@ -3,8 +3,10 @@ package com.omegarealm.core.command.paper;
 import com.omegarealm.core.diagnostics.BuildIdentity;
 import com.omegarealm.core.diagnostics.RuntimeDiagnostics;
 import com.omegarealm.core.player.PlayerService;
+import com.omegarealm.core.player.paper.ProfileDialog;
 import com.omegarealm.core.scheduler.OmegaScheduler;
 import io.papermc.paper.command.brigadier.Commands;
+import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
 import java.util.HashSet;
@@ -20,6 +22,7 @@ import java.util.logging.Logger;
 public final class OmegaCommands {
 
     private final RoleCommand roles;
+    private final ProfileCommand profiles;
     private final HelpCommand help;
     private final DiagnosticsCommand diagnostics;
     private volatile Set<String> registered = Set.of();
@@ -29,7 +32,12 @@ public final class OmegaCommands {
                          OmegaScheduler scheduler, CommandAudit audit, Logger logger,
                          Runnable schedulingFailure, BiConsumer<Player, Runnable> playerReply) {
         Objects.requireNonNull(access, "access");
-        roles = new RoleCommand(access, players, scheduler, audit, logger, schedulingFailure, playerReply);
+        OnlinePlayerTargetSuggestions targetSuggestions =
+                new OnlinePlayerTargetSuggestions(access, Bukkit::getOnlinePlayers);
+        roles = new RoleCommand(access, players, scheduler, audit, logger,
+                schedulingFailure, playerReply, targetSuggestions);
+        profiles = new ProfileCommand(access, players::get, playerReply,
+                ProfileDialog::show, logger, schedulingFailure, targetSuggestions);
         help = new HelpCommand(access);
         diagnostics = new DiagnosticsCommand(access, build, runtime, audit);
     }
@@ -37,6 +45,8 @@ public final class OmegaCommands {
     public void register(Commands registrar) {
         Set<String> roleLabels = registrar.register(roles.node(), CommandCatalog.ROLE.description(),
                 CommandCatalog.ROLE.aliases());
+        Set<String> profileLabels = registrar.register(profiles.node(), CommandCatalog.PROFILE.description(),
+                CommandCatalog.PROFILE.aliases());
         Set<String> helpLabels = registrar.register(help.node(), CommandCatalog.HELP.description(),
                 CommandCatalog.HELP.aliases());
         Set<String> buildLabels = registrar.register(diagnostics.buildNode(), CommandCatalog.BUILD.description(),
@@ -44,12 +54,14 @@ public final class OmegaCommands {
         Set<String> statusLabels = registrar.register(diagnostics.statusNode(), CommandCatalog.STATUS.description(),
                 CommandCatalog.STATUS.aliases());
         if (!roleLabels.containsAll(CommandCatalog.ROLE.labels())
+                || !profileLabels.containsAll(CommandCatalog.PROFILE.labels())
                 || !helpLabels.containsAll(CommandCatalog.HELP.labels())
                 || !buildLabels.containsAll(CommandCatalog.BUILD.labels())
                 || !statusLabels.containsAll(CommandCatalog.STATUS.labels())) {
             throw new IllegalStateException("Omega command registration did not claim its expected labels.");
         }
         var labels = new HashSet<>(roleLabels);
+        labels.addAll(profileLabels);
         labels.addAll(helpLabels);
         labels.addAll(buildLabels);
         labels.addAll(statusLabels);

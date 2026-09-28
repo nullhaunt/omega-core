@@ -18,15 +18,17 @@ public final class CommandCatalog {
     public static final String NAMESPACE = "omegacore";
 
     public static final Definition HELP = new Definition("help", "Show available commands", Role.PLAYER,
-            null, List.of());
+            null, List.of(), false);
     public static final Definition BUILD = new Definition("build", "Show the deployed Omega build identity",
-            Role.ADMIN, Category.MANAGEMENT, List.of());
+            Role.ADMIN, Category.MANAGEMENT, List.of(), false);
     public static final Definition STATUS = new Definition("status", "Show Omega runtime observations",
-            Role.ADMIN, Category.MANAGEMENT, List.of());
+            Role.ADMIN, Category.MANAGEMENT, List.of(), false);
     public static final Definition ROLE = new Definition("role", "Manage realm-wide player roles", Role.ADMIN,
-            Category.MANAGEMENT, List.of());
+            Category.MANAGEMENT, List.of(), false);
+    public static final Definition PROFILE = new Definition("profile", "View a player's Omega profile",
+            Role.PLAYER, null, List.of(), true);
 
-    private static final List<Definition> DEFINITIONS = List.of(HELP, BUILD, STATUS, ROLE);
+    private static final List<Definition> DEFINITIONS = List.of(HELP, PROFILE, BUILD, STATUS, ROLE);
     private static final Map<String, Definition> LABELS = DEFINITIONS.stream()
             .flatMap(definition -> definition.labels().stream().map(label -> Map.entry(label, definition)))
             .collect(Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));
@@ -57,6 +59,9 @@ public final class CommandCatalog {
         if (definition == ROLE) {
             return prefix + "role set <username|UUID> <" + availableRoles(actor) + "> <reason...>";
         }
+        if (definition == PROFILE) {
+            return prefix + "profile [current-username|UUID]";
+        }
         if (definition == BUILD || definition == STATUS) {
             return prefix + definition.name();
         }
@@ -64,7 +69,7 @@ public final class CommandCatalog {
     }
 
     public record Definition(String name, String description, Role minimumRole,
-                             Category category, List<String> aliases) {
+                             Category category, List<String> aliases, boolean playersOnly) {
 
         public Set<String> labels() {
             var labels = new java.util.HashSet<String>();

@@ -47,6 +47,9 @@ public final class CommandAccess {
     }
 
     public boolean allows(CommandCatalog.Definition definition, CommandSourceStack source) {
+        if (definition.playersOnly() && !(source.getSender() instanceof Player)) {
+            return false;
+        }
         return actor(source).map(actor -> actor instanceof AuthorizationActor.LocalConsole
                 || actor instanceof AuthorizationActor.Player player
                 && player.role().includes(definition.minimumRole())).orElse(false);
@@ -55,7 +58,9 @@ public final class CommandAccess {
     public AuthorizationActor require(CommandCatalog.Definition definition,
                                       CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
         Optional<AuthorizationActor> current = actor(context.getSource());
-        if (current.isPresent() && (current.get() instanceof AuthorizationActor.LocalConsole
+        boolean rightSender = !definition.playersOnly() || context.getSource().getSender() instanceof Player;
+        if (rightSender && current.isPresent()
+                && (current.get() instanceof AuthorizationActor.LocalConsole
                 || current.get() instanceof AuthorizationActor.Player player
                 && player.role().includes(definition.minimumRole()))) {
             return current.get();

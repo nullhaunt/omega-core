@@ -39,10 +39,12 @@ public final class RoleCommand {
     private final Logger logger;
     private final Runnable schedulingFailure;
     private final BiConsumer<Player, Runnable> playerReply;
+    private final OnlinePlayerTargetSuggestions targetSuggestions;
 
     RoleCommand(CommandAccess access, Supplier<PlayerService> players, OmegaScheduler scheduler,
                 CommandAudit audit, Logger logger, Runnable schedulingFailure,
-                BiConsumer<Player, Runnable> playerReply) {
+                BiConsumer<Player, Runnable> playerReply,
+                OnlinePlayerTargetSuggestions targetSuggestions) {
         this.access = Objects.requireNonNull(access, "access");
         this.players = Objects.requireNonNull(players, "players");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
@@ -50,6 +52,7 @@ public final class RoleCommand {
         this.logger = Objects.requireNonNull(logger, "logger");
         this.schedulingFailure = Objects.requireNonNull(schedulingFailure, "schedulingFailure");
         this.playerReply = Objects.requireNonNull(playerReply, "playerReply");
+        this.targetSuggestions = Objects.requireNonNull(targetSuggestions, "targetSuggestions");
     }
 
     private void record(AuthorizationActor actor, Outcome outcome,
@@ -64,6 +67,8 @@ public final class RoleCommand {
                 .then(Commands.literal("set")
                         .executes(this::usage)
                         .then(Commands.argument("target", StringArgumentType.word())
+                                .suggests((context, builder) -> targetSuggestions.suggest(
+                                        CommandCatalog.ROLE, context, builder))
                                 .executes(this::usage)
                                 .then(Commands.argument("role", StringArgumentType.word())
                                         .executes(this::usage)

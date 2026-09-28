@@ -32,8 +32,10 @@ public sealed interface PlayerTarget permits PlayerTarget.ByUuid, PlayerTarget.B
     record ByUsername(String username) implements PlayerTarget {
         public ByUsername {
             Objects.requireNonNull(username, "username");
-            if (!username.matches("[A-Za-z0-9_]{1,16}")) {
-                throw new IllegalArgumentException("Use a canonical UUID or a Minecraft username.");
+            // Floodgate's default prefix is part of the stored username, including for
+            // players whose Bedrock gamertag matches a separate Java account.
+            if (!username.matches("(?:[A-Za-z0-9_]{1,16}|\\.[A-Za-z0-9_]{1,15})")) {
+                throw new IllegalArgumentException("Use a canonical UUID or a current stored username.");
             }
         }
     }

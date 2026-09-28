@@ -44,6 +44,15 @@ class RoleCommandTest {
         });
     }
 
+    private static Player namedPlayer(String name) {
+        return proxy(Player.class, method -> {
+            if (method.equals("getName")) {
+                return name;
+            }
+            throw new AssertionError(method);
+        });
+    }
+
     @Test
     void rejectsPlayersRconAndDelegatedConsoleExecutionThroughTheParser() throws Exception {
         try (Harness harness = new Harness()) {
@@ -270,6 +279,32 @@ class RoleCommandTest {
     }
 
     @Test
+    void targetSuggestionsOfferConnectedNamesOnlyWithCurrentCommandAccess() throws Exception {
+        try (Harness harness = new Harness()) {
+            harness.onlinePlayers.add(namedPlayer("TargetPlayer"));
+            harness.onlinePlayers.add(namedPlayer(".Unreference"));
+
+            var console = source(harness.console, null);
+            var names = harness.dispatcher.getCompletionSuggestions(
+                    harness.dispatcher.parse("role set tAr", console)).get();
+            assertEquals(List.of("TargetPlayer"), names.getList().stream()
+                    .map(com.mojang.brigadier.suggestion.Suggestion::getText).toList());
+
+            Player player = harness.player();
+            var playerSource = source(player, player);
+            harness.authorities.put(player, new AuthorizationSnapshot(UUID.randomUUID(), Role.ADMIN, 1));
+            var parsed = harness.dispatcher.parse("role set .u", playerSource);
+            var bedrock = harness.dispatcher.getCompletionSuggestions(parsed).get();
+            assertEquals(List.of(".Unreference"), bedrock.getList().stream()
+                    .map(com.mojang.brigadier.suggestion.Suggestion::getText).toList());
+
+            harness.authorities.remove(player);
+            assertTrue(harness.dispatcher.getCompletionSuggestions(parsed).get().isEmpty());
+            assertEquals(0, harness.repository.calls);
+        }
+    }
+
+    @Test
     void revocationBetweenParseAndExecutePreventsSubmittingRoleWork() throws Exception {
         try (Harness harness = new Harness()) {
             Player player = proxy(Player.class, method -> null);
@@ -312,6 +347,7 @@ class RoleCommandTest {
         private final Queue<Runnable> replies = new ConcurrentLinkedQueue<>();
         private final Queue<Runnable> playerReplies = new ConcurrentLinkedQueue<>();
         private final Map<Player, AuthorizationSnapshot> authorities = new IdentityHashMap<>();
+        private final List<Player> onlinePlayers = new ArrayList<>();
         private final ExecutorService worker = Executors.newSingleThreadExecutor();
         private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1);
         private final Repository repository = new Repository();
@@ -372,7 +408,8 @@ class RoleCommandTest {
             CommandAudit audit = new CommandAudit(logger, "unit-server", () -> service);
             dispatcher.getRoot().addChild(new RoleCommand(access, () -> service, scheduler,
                     audit, logger, () -> fail("Unexpected scheduling failure"),
-                    (player, reply) -> playerReplies.add(reply)).node());
+                    (player, reply) -> playerReplies.add(reply),
+                    new OnlinePlayerTargetSuggestions(access, () -> onlinePlayers)).node());
         }
 
         private Player player() {
