@@ -2,6 +2,7 @@ package com.omegarealm.core;
 
 import com.omegarealm.core.authorization.paper.NativeCommandFence;
 import com.omegarealm.core.authorization.paper.PlayerPermissionAdapter;
+import com.omegarealm.core.chat.paper.OmegaChatAdapter;
 import com.omegarealm.core.command.paper.CommandAccess;
 import com.omegarealm.core.command.paper.CommandAudit;
 import com.omegarealm.core.command.paper.OmegaCommands;
@@ -45,6 +46,8 @@ public final class OmegaPlugin extends JavaPlugin {
             playerConnections = new PlayerConnectionAdapter(this, this::state, runtime::players,
                     runtime::failPlayerHandling, getLogger(), Clock.systemUTC(), config.debug());
             getServer().getPluginManager().registerEvents(playerConnections, this);
+            getServer().getPluginManager().registerEvents(
+                    new OmegaChatAdapter(this::state, runtime::failChatHandling), this);
             playerPermissions = new PlayerPermissionAdapter(this, playerConnections::authorization, runtime::failPlayerHandling);
             CommandAccess commandAccess = new CommandAccess(getServer()::getConsoleSender,
                     this::state, playerPermissions::authorization);
@@ -76,7 +79,7 @@ public final class OmegaPlugin extends JavaPlugin {
         } catch (ConfigException exception) {
             getLogger().severe("Omega Core startup failed: " + exception.getMessage());
             stopServer();
-        } catch (RuntimeException exception) {
+        } catch (RuntimeException | LinkageError exception) {
             getLogger().severe("Unexpected Omega Core startup failure; check the deployment and configuration.");
             stopServer();
         }

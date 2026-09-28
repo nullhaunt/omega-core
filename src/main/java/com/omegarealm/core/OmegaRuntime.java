@@ -149,6 +149,10 @@ public final class OmegaRuntime {
         fail("Player connection handling is unavailable.", false);
     }
 
+    public void failChatHandling() {
+        fail("Public chat delivery is unavailable.", false);
+    }
+
     /**
      * Platform callback failure closes admission even after startup has completed.
      */

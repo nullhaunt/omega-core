@@ -119,6 +119,25 @@ and translated by Geyser for Bedrock. `omegacore:profile` is the namespaced path
 console and delegated senders cannot open a profile dialog. Online names appear as target
 suggestions; offline current names and UUIDs remain valid when entered directly.
 
+Omega handles public player chat through a server-owned delivery path. It cancels Paper's
+normal signed broadcast and sends a fresh Adventure component to the viewers retained by
+the chat event, including the console when it is a viewer. The message shows the current
+online name and the final plain text from the event, so formatting and interactive text
+do not become part of public chat. A chat event already cancelled by another listener
+remains silent. Chat is dropped unless Omega is `READY`; an unexpected delivery failure
+fails the runtime and requests server shutdown. This path does not forward the incoming
+player signature to Java viewers. Omega supplies the same component to Java and to
+Geyser-backed Bedrock viewers. It does not add a mute, player-report or review workflow
+yet; those server-side moderation rules need their own gate. Other plugins or future
+private-chat features must follow the same delivery rule to avoid signed player chat.
+Account, skin and server reporting outside this public-chat path remains possible.
+See Paper's [chat event](https://docs.papermc.io/paper/dev/chat-events/) and
+[signed message](https://docs.papermc.io/paper/dev/component-api/signed-messages/) contracts.
+Java 25 unit tests and shaded packaging passed for this change. A disposable Paper 26.3
+build-49 run accepted an inbound protocol chat message, delivered it to the client as a
+system-chat packet, logged it to the console and shut down cleanly. Java graphical-client
+report UI and live Geyser/Bedrock rendering have not been checked for this build.
+
 `/build` and `/status` are standalone management diagnostics for fresh ADMIN/OWNER players
 and the actual local console. RCON, delegated execution and lower roles cannot use them;
 `/help` hides them from those players. `/build` reports the shaded artifact's version,
