@@ -9,10 +9,14 @@ import com.omegarealm.core.authorization.Role;
 import com.omegarealm.core.authorization.RoleChangeRequest;
 import com.omegarealm.core.authorization.RoleChangeResult;
 import com.omegarealm.core.command.CommandAuditEvent.Outcome;
+import com.omegarealm.core.player.PlayerProfile;
 import com.omegarealm.core.player.PlayerService;
+import com.omegarealm.core.player.PlayerTarget;
+import com.omegarealm.core.player.PlayerTargetResolution;
 import com.omegarealm.core.scheduler.OmegaScheduler;
 import io.papermc.paper.command.brigadier.CommandSourceStack;
 import io.papermc.paper.command.brigadier.Commands;
+import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 
 import java.util.Locale;
@@ -59,7 +63,7 @@ public final class RoleCommand {
                 .executes(this::usage)
                 .then(Commands.literal("set")
                         .executes(this::usage)
-                        .then(Commands.argument("uuid", StringArgumentType.word())
+                        .then(Commands.argument("target", StringArgumentType.word())
                                 .executes(this::usage)
                                 .then(Commands.argument("role", StringArgumentType.word())
                                         .executes(this::usage)
@@ -90,16 +94,12 @@ public final class RoleCommand {
         UUID operationId = UUID.randomUUID();
         CommandSourceStack source = context.getSource();
         var sender = source.getSender();
-        String identity = StringArgumentType.getString(context, "uuid");
-        UUID uuid;
+        PlayerTarget target;
         try {
-            uuid = UUID.fromString(identity);
-            if (!uuid.toString().equalsIgnoreCase(identity)) {
-                throw new IllegalArgumentException();
-            }
+            target = PlayerTarget.parse(StringArgumentType.getString(context, "target"));
         } catch (IllegalArgumentException invalid) {
             CommandMessages.send(sender, CommandMessages.Kind.ERROR,
-                    "Use a canonical UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).");
+                    "Use a current username or canonical UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).");
             record(actor, Outcome.DENIED, operationId, null);
             return 0;
         }
@@ -114,10 +114,9 @@ public final class RoleCommand {
             return 0;
         }
 
-        RoleChangeRequest request;
+        String reason;
         try {
-            request = new RoleChangeRequest(actor, uuid, role,
-                    StringArgumentType.getString(context, "reason"), operationId);
+            reason = RoleChangeRequest.normalizeReason(StringArgumentType.getString(context, "reason"));
         } catch (IllegalArgumentException invalid) {
             CommandMessages.send(sender, CommandMessages.Kind.ERROR,
                     "A reason of 1-512 characters without control characters is required.");
@@ -127,7 +126,8 @@ public final class RoleCommand {
 
         // Command access is already established. Explain operation restrictions instead
         // of sending an unknown-command translation with no parser error beneath it.
-        if (actor instanceof AuthorizationActor.Player player && player.uuid().equals(uuid)) {
+        if (actor instanceof AuthorizationActor.Player player
+                && target instanceof PlayerTarget.ByUuid(UUID uuid1) && player.uuid().equals(uuid1)) {
             CommandMessages.send(sender, CommandMessages.Kind.ERROR,
                     "You cannot change your own role in-game. Use the local console.");
             record(actor, Outcome.DENIED, operationId, null);
@@ -155,54 +155,96 @@ public final class RoleCommand {
             record(actor, Outcome.FAILED, operationId, null);
             return 0;
         }
-        CompletionStage<RoleChangeResult> pending = service.changeRole(request);
-        if (!pending.toCompletableFuture().isCompletedExceptionally()) {
+        CompletionStage<PlayerTargetResolution> lookup = service.resolveTarget(target);
+        if (!lookup.toCompletableFuture().isCompletedExceptionally()) {
             record(actor, Outcome.QUEUED, operationId, null);
-            CommandMessages.send(sender, CommandMessages.Kind.INFO, "Role change queued.");
+            CommandMessages.send(sender, CommandMessages.Kind.INFO, "Player lookup queued.");
         }
-        pending.whenComplete((result, failure) -> {
-            // Replies use the console's global context or this exact connection's entity context.
-            // Once accepted, persistence may finish after disconnect; its audit remains durable.
-            try {
-                if (failure != null) {
-                    record(actor, Outcome.FAILED, operationId, null);
-                } else {
-                    record(actor, Outcome.valueOf(result.status().name()),
-                            operationId, result.auditId());
-                }
-                Runnable reply = () -> {
-                    if (failure != null) {
-                        CommandMessages.send(sender, CommandMessages.Kind.ERROR,
-                                "Role change did not complete successfully; inspect audit history before retrying.");
-                        return;
-                    }
-                    String message = switch (result.status()) {
-                        case CHANGED -> "Role changed: target=" + result.authorization().playerUuid()
-                                + ", role=" + result.authorization().role().name()
-                                + ", revision=" + result.authorization().revision() + ", audit=" + result.auditId() + ".";
-                        case UNCHANGED -> "Role unchanged; no revision or audit record was created.";
-                        case DENIED ->
-                                "Role change denied: you cannot manage this target or role with your current authority. No role change was made.";
-                        case NOT_FOUND -> "Target was not found at role lookup; no role change was made.";
-                    };
-                    CommandMessages.Kind kind = switch (result.status()) {
-                        case CHANGED, UNCHANGED -> CommandMessages.Kind.SUCCESS;
-                        case DENIED, NOT_FOUND -> CommandMessages.Kind.ERROR;
-                    };
-                    CommandMessages.send(sender, kind, message);
-                };
-                if (sender instanceof Player player) {
-                    playerReply.accept(player, reply);
-                } else {
-                    scheduler.global(reply);
-                }
-            } catch (RuntimeException unavailable) {
-                logger.warning("Role-change reply unavailable; inspect durable audit history.");
-                if (access.ready()) {
-                    schedulingFailure.run();
-                }
-            }
-        });
+        lookup.whenComplete((resolution, lookupFailure) -> finishLookup(service, actor, target,
+                role, reason, operationId, sender, resolution, lookupFailure));
         return 1;
+    }
+
+    private void finishLookup(PlayerService service, AuthorizationActor actor, PlayerTarget target,
+                              Role role, String reason, UUID operationId,
+                              CommandSender sender,
+                              PlayerTargetResolution resolution, Throwable failure) {
+        if (failure != null) {
+            record(actor, Outcome.FAILED, operationId, null);
+            reply(sender, CommandMessages.Kind.ERROR,
+                    "Player lookup failed; no role change was accepted.");
+            return;
+        }
+        if (resolution.status() == PlayerTargetResolution.Status.NOT_FOUND) {
+            record(actor, Outcome.NOT_FOUND, operationId, null);
+            String message = target instanceof PlayerTarget.ByUuid
+                    ? "No persisted player has that UUID. No role change was made."
+                    : "No known player has that current username. No role change was made.";
+            reply(sender, CommandMessages.Kind.ERROR, message);
+            return;
+        }
+        if (resolution.status() == PlayerTargetResolution.Status.AMBIGUOUS) {
+            record(actor, Outcome.DENIED, operationId, null);
+            reply(sender, CommandMessages.Kind.ERROR,
+                    "Multiple players have that stored username. Use a UUID; no role change was made.");
+            return;
+        }
+
+        PlayerProfile profile = resolution.profile();
+        if (actor instanceof AuthorizationActor.Player player && player.uuid().equals(profile.uuid())) {
+            record(actor, Outcome.DENIED, operationId, null);
+            reply(sender, CommandMessages.Kind.ERROR,
+                    "You cannot change your own role in-game. Use the local console.");
+            return;
+        }
+
+        RoleChangeRequest request = new RoleChangeRequest(actor, profile.uuid(), role, reason, operationId);
+        CompletionStage<RoleChangeResult> pending = service.changeRole(request);
+        pending.whenComplete((result, mutationFailure) -> finishRoleChange(actor, profile,
+                operationId, sender, result, mutationFailure));
+    }
+
+    private void finishRoleChange(AuthorizationActor actor, PlayerProfile profile, UUID operationId,
+                                  CommandSender sender,
+                                  RoleChangeResult result, Throwable failure) {
+        if (failure != null) {
+            record(actor, Outcome.FAILED, operationId, null);
+            reply(sender, CommandMessages.Kind.ERROR,
+                    "Role change did not complete successfully; inspect audit history before retrying.");
+            return;
+        }
+        record(actor, Outcome.valueOf(result.status().name()), operationId, result.auditId());
+        String target = profile.username() + " (" + profile.uuid() + ")";
+        String message = switch (result.status()) {
+            case CHANGED -> "Role changed: target=" + target
+                    + ", role=" + result.authorization().role().name()
+                    + ", revision=" + result.authorization().revision() + ", audit=" + result.auditId() + ".";
+            case UNCHANGED -> "Role unchanged for " + target + "; no revision or audit record was created.";
+            case DENIED -> "Role change denied for " + target
+                    + ": you cannot manage this target or role with your current authority. No role change was made.";
+            case NOT_FOUND -> "Target " + target + " was not found at role write; no role change was made.";
+        };
+        CommandMessages.Kind kind = switch (result.status()) {
+            case CHANGED, UNCHANGED -> CommandMessages.Kind.SUCCESS;
+            case DENIED, NOT_FOUND -> CommandMessages.Kind.ERROR;
+        };
+        reply(sender, kind, message);
+    }
+
+    private void reply(CommandSender sender, CommandMessages.Kind kind, String message) {
+        // Replies use the console's global context or this exact connection's entity context.
+        try {
+            Runnable send = () -> CommandMessages.send(sender, kind, message);
+            if (sender instanceof Player player) {
+                playerReply.accept(player, send);
+            } else {
+                scheduler.global(send);
+            }
+        } catch (RuntimeException unavailable) {
+            logger.warning("Role-command reply unavailable; inspect audit history.");
+            if (access.ready()) {
+                schedulingFailure.run();
+            }
+        }
     }
 }

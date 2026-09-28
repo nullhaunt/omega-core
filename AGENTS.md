@@ -111,12 +111,15 @@ unrequested systems. Creating this file does not authorize the next implementati
   migrations are immutable, including whitespace and comments; schema changes require a
   new versioned script. Restore the original script when accidental edits cause a checksum
   mismatch. Do not automatically baseline, repair, clean, or adopt an unmanaged nonempty schema.
-- UUID is authoritative player identity. Usernames are mutable metadata. Session
+- UUID is authoritative player identity. Usernames are mutable metadata. Target resolution
+  accepts canonical UUIDs or exact current stored names, ignoring ASCII case; ambiguous names
+  must fail instead of guessing. Never duplicate name-lookup SQL in command handlers. Session
   uniqueness and recovery need an explicit join/reconnect contract before implementation.
 - Role changes require a reason and a durable audit in the same transaction. Recheck stored
   actor/target roles under locks acquired in UUID order; never trust a supplied role snapshot.
-  The initial command is local-console-only and targets persisted UUIDs, including offline
-  players. RCON, command blocks, players and delegated execution do not acquire console authority.
+  Role commands target persisted players, including offline players, and resolve to UUIDs
+  before mutation. Only the actual local console has console authority; RCON, command blocks,
+  players and delegated execution do not acquire it.
 - Authorization polling uses the existing ordered worker and deadline clock: one-second
   interval, batches of at most 64, two-second refresh-query timeout and five-second freshness
   measured from before the database read. Access denies on expiry even if the timer is late.
@@ -198,7 +201,7 @@ Permission changes reconcile every 250 ms on captured entity handles; stale appl
 deny commands, and a five-second application delay requires reconnect. Physical kicks wait
 for the owning context. The existing scheduler owns reconciliation/registry refresh tasks;
 the permission adapter owns attachments. No new executors or configuration keys were added.
-Username/UUID lookup, controlled shutdown/restart, backup/rollback and
+Controlled shutdown/restart, backup/rollback and
 general gameplay scheduling are deferred slices.
 
 Java 25 checks passed with 269 unit tests and 51 native PostgreSQL tests. Database evidence
@@ -254,7 +257,7 @@ Operational logs still cover pre-acceptance validation denials and native comman
 native logs prove invocation only. The table records target UUID and validated requested role;
 neither raw arguments nor reasons enter it.
 There is no new pool, executor, timer, configuration key, purge job or automatic retention.
-Username/UUID resolution is the next separate gate.
+At that gate, username/UUID resolution remained a separate task.
 
 Java 25 `test integrationTest build --offline --console=plain` passed with 276 unit and
 54 native PostgreSQL tests. A fresh disposable Paper 26.3 build-49/PostgreSQL fixture in
@@ -276,6 +279,21 @@ Java 25 checks passed with 280 unit and 55 native PostgreSQL tests. A fresh disp
 player rows, a console `stop` row after clean shutdown, role links, masking and expiry. The
 emergency unaudited `stop` fallback was source-checked but not exercised on Paper. Live
 deployment, graphical-client rendering, Folia and production load remain unverified.
+
+The reusable player-target gate adds `PlayerTarget` parsing, `PlayerTargetResolver` and
+`PlayerTargetResolution` in the player domain. `/role set` uses this service to resolve a
+canonical UUID or current stored username to a persisted UUID before calling the existing
+role writer. Name matching is exact and case-insensitive; unknown, old or ambiguous names
+do not mutate roles. V007 adds a nonunique lookup index. Resolution shares the ordered worker,
+bounded mailbox, owned connection and 15-second deadline; stop/failure rejects pending work.
+The immediate message acknowledges lookup queueing; V006 `QUEUED`/final rows begin only when
+a resolved role mutation is accepted. No external identity service, executor or config key was
+added. Java 25 `test integrationTest build --offline --console=plain` passed with 289 unit
+and 56 native PostgreSQL tests; a fresh isolated Paper 26.3 build-49/PostgreSQL run under
+`build/player-target-smoke` verified mixed-case name commands, unknown-name feedback,
+player replies, role/audit writes, expiry and orderly shutdown. The fixture processes stopped;
+live deployment, graphical-client rendering, Folia and production load remain unverified.
+See README and `docs/AUTHORIZATION.md` for operator semantics.
 
 The earlier snapshot below records bootstrap evidence only; it is not current feature status.
 

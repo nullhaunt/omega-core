@@ -212,6 +212,46 @@ class PlayerSessionRepositoryIntegrationTest {
     }
 
     @Test
+    void targetResolverUsesCurrentNamesAndNeverGuessesBetweenUuidMatches() throws Exception {
+        try (Database database = database();
+             var alpha = ready(database, "alpha"); var beta = ready(database, "beta");
+             Connection admin = database.openConnection()) {
+            SessionStart first = start("Orbit", JOINED);
+            alpha.join(first);
+            alpha.endSession(first.sessionId(), JOINED.plusSeconds(1), SessionEnd.QUIT);
+
+            SessionStart renamed = new SessionStart(UUID.randomUUID(), first.playerUuid(),
+                    "Comet", JOINED.plusSeconds(2));
+            beta.join(renamed);
+            PlayerTargetResolution current = alpha.resolveTarget(PlayerTarget.parse("cOmEt"));
+            assertEquals(PlayerTargetResolution.Status.FOUND, current.status());
+            assertEquals(first.playerUuid(), current.profile().uuid());
+            assertEquals("Comet", current.profile().username());
+            assertEquals(PlayerTargetResolution.Status.NOT_FOUND,
+                    alpha.resolveTarget(PlayerTarget.parse("Orbit")).status());
+            assertEquals(PlayerTargetResolution.Status.NOT_FOUND,
+                    alpha.resolveTarget(PlayerTarget.parse("Com")).status());
+
+            SessionStart duplicate = start("COMET", JOINED.plusSeconds(3));
+            alpha.join(duplicate);
+            assertEquals(PlayerTargetResolution.Status.AMBIGUOUS,
+                    beta.resolveTarget(PlayerTarget.parse("comet")).status());
+
+            PlayerTargetResolution byUuid = beta.resolveTarget(new PlayerTarget.ByUuid(first.playerUuid()));
+            assertEquals(PlayerTargetResolution.Status.FOUND, byUuid.status());
+            assertEquals("Comet", byUuid.profile().username());
+            assertEquals(PlayerTargetResolution.Status.NOT_FOUND,
+                    beta.resolveTarget(new PlayerTarget.ByUuid(UUID.randomUUID())).status());
+            assertEquals(0, scalar(admin, "SELECT count(*) FROM command_audit"));
+            assertEquals(0, scalar(admin, "SELECT count(*) FROM role_change_audit"));
+            assertEquals(1, scalar(admin, """
+                    SELECT count(*) FROM pg_indexes
+                    WHERE tablename = 'players' AND indexname = 'players_current_username_lookup_idx'
+                    """));
+        }
+    }
+
+    @Test
     void roleChangeCommitsAuditAndRealmWideRevisionWhileNoOpDoesNotWrite() throws Exception {
         try (Database database = database();
              var alpha = ready(database, "alpha"); var beta = ready(database, "beta");
@@ -495,7 +535,7 @@ class PlayerSessionRepositoryIntegrationTest {
             assertEquals(JOINED, loaded.storedProfile().orElseThrow().firstSeenAt());
             assertEquals(JOINED, loaded.storedProfile().orElseThrow().lastSeenAt());
             assertEquals(0, scalar(admin, "SELECT count(*) FROM player_sessions"));
-            assertEquals(6, scalar(admin, "SELECT count(*) FROM flyway_schema_history WHERE success"));
+            assertEquals(7, scalar(admin, "SELECT count(*) FROM flyway_schema_history WHERE success"));
         }
     }
 

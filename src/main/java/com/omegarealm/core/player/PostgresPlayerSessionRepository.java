@@ -329,6 +329,17 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
     }
 
     @Override
+    public PlayerTargetResolution resolveTarget(PlayerTarget target) throws PersistenceException {
+        Objects.requireNonNull(target, "target");
+        requireRecovered();
+        return transaction("player target lookup", () -> switch (target) {
+            case PlayerTarget.ByUuid uuid -> selectPlayer(uuid.uuid())
+                    .map(PlayerTargetResolution::found).orElseGet(PlayerTargetResolution::missing);
+            case PlayerTarget.ByUsername name -> selectByUsername(name.username());
+        });
+    }
+
+    @Override
     public Optional<PlayerSession> findSession(UUID sessionId) throws PersistenceException {
         Objects.requireNonNull(sessionId, "sessionId");
         return transaction("session load", () -> selectSession(sessionId));
@@ -473,6 +484,26 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
             statement.setObject(1, playerUuid);
             try (ResultSet result = statement.executeQuery()) {
                 return result.next() ? Optional.of(profile(result)) : Optional.empty();
+            }
+        }
+    }
+
+    private PlayerTargetResolution selectByUsername(String username) throws SQLException {
+        try (PreparedStatement statement = prepare(connection, """
+                SELECT uuid, username, first_seen_at, last_seen_at
+                FROM players
+                WHERE lower(username) = lower(?)
+                ORDER BY uuid
+                LIMIT 2
+                """)) {
+            statement.setString(1, username);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    return PlayerTargetResolution.missing();
+                }
+                PlayerProfile first = profile(rows);
+                return rows.next() ? PlayerTargetResolution.ambiguous()
+                        : PlayerTargetResolution.found(first);
             }
         }
     }

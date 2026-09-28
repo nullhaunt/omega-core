@@ -549,6 +549,11 @@ class OmegaRuntimeTest {
     private static class TestRepository implements PlayerSessionRepository {
 
         @Override
+        public PlayerTargetResolution resolveTarget(PlayerTarget target) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
         public void appendCommandAudit(com.omegarealm.core.command.CommandAuditEvent event) {
             throw new UnsupportedOperationException();
         }

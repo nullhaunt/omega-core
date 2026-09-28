@@ -85,13 +85,18 @@ An authorized request for the existing role creates neither a revision nor an au
 Use the actual local console, or an authenticated ADMIN/OWNER player:
 
 ```text
-role set <uuid> <PLAYER|MODERATOR|ADMIN|OWNER> <reason>
+role set <username|UUID> <PLAYER|MODERATOR|ADMIN|OWNER> <reason...>
 ```
 
-The target must have a persisted player identity; offline targets are supported. UUIDs must
-use the canonical form. Role names accept either case; a reason of 1-512 characters is
-required. Command execution queues work without blocking a tick thread. The final console
-or player reply reports the committed revision and audit ID. ADMIN can assign PLAYER/MODERATOR;
+The target must have a persisted player identity; offline targets are supported. A name
+matches the player's current stored username exactly, ignoring ASCII case. Old names,
+partial names and players who have never joined do not resolve. If more than one UUID has
+the same stored name, use a canonical UUID; Omega will not guess. No external identity
+service is queried. UUIDs remain the identity used for role writes and audits. Role names
+accept either case; a reason of 1-512 characters is required. Command execution queues
+the target lookup and any resulting role write on the existing I/O worker without blocking
+a tick thread. The immediate reply acknowledges the lookup queue; a successful final reply
+reports the committed revision and audit ID. ADMIN can assign PLAYER/MODERATOR;
 OWNER can also assign ADMIN. Only local console can change OWNER. RCON, command blocks,
 delegated execution, self-changes and peer/superior targets cannot grant Omega authority.
 `/help` lists commands visible to the sender; `/help role` explains the role command only to
@@ -99,12 +104,13 @@ authorized staff. The registered namespaced paths `omegacore:role` and `omegacor
 those checks. The old `/omega role set` form has been retired. Native management roots are
 summarized in ADMIN/OWNER help output.
 
-Authorized staff receive usage guidance for incomplete commands and specific UUID, role and
-reason validation messages. Self-changes explain the local-console requirement; other policy
-denials explain that no role change was made. Command access remains hidden from non-staff.
+Authorized staff receive usage guidance for incomplete commands and specific target, role and
+reason validation messages. Missing or ambiguous names have distinct replies. Self-changes
+explain the local-console requirement; other policy denials explain that no role change was
+made. Command access remains hidden from non-staff.
 Omega replies use `Ω |` with player-side information, success and error colors. An accepted
-role write immediately reports that it was queued; the final reply follows database completion.
-Queue acceptance is not proof of a committed change.
+target lookup immediately reports that it was queued; the final reply follows database completion.
+Lookup queue acceptance is not proof of a committed change.
 If completion is uncertain, inspect audit history before retrying. Changes remain durable if
 shutdown wins after commit.
 
@@ -158,15 +164,17 @@ must use the same audit path; no staff command handlers exist yet. RCON native i
 are marked `UNTRUSTED` rather than gaining local-console authority. Everyday player commands
 and command blocks are outside this staff/management audit boundary.
 
-Accepted `/role set` requests write a `QUEUED` row when the existing database worker begins
-processing them. Their final `CHANGED`, `UNCHANGED`, `DENIED` or `NOT_FOUND` row uses the same
-operation ID. A `CHANGED` row links the existing `role_change_audit` record and commits in the
+Accepted `/role set` mutations write a `QUEUED` row when the existing database worker begins
+processing them, after target resolution. Their final `CHANGED`, `UNCHANGED`, `DENIED` or
+`NOT_FOUND` row uses the same operation ID. A `CHANGED` row links the existing
+`role_change_audit` record and commits in the
 same transaction as the role and revision. If either audit write fails, the role does not
 change and Omega closes admission; a `QUEUED` row may remain without a final row when the
-outcome is uncertain. The immediate queued message means the request entered the worker
-queue, not that its database row has committed. Invalid input, self-denials and requests
-rejected before worker acceptance remain in the operational log only. The table records the
-target UUID and normalized requested role. Raw command arguments and reasons are absent from
+outcome is uncertain. The immediate lookup-queued message means only the lookup entered the
+worker queue; a missing or ambiguous name has no durable role-request row. Invalid input,
+self-denials and requests rejected before mutation acceptance remain in the operational log
+only. The table records the target UUID and normalized requested role. Raw command arguments
+and reasons are absent from
 `command_audit`; the required reason remains in the detailed
 `role_change_audit`. The table is append-only through Omega, with no automatic purge yet.
 Unlike `command_audit`, `role_change_audit` records only committed role transitions, including
@@ -189,7 +197,7 @@ This enforcement is installed at server load before runtime bootstrap starts and
 can publish READY. New commands belong in the normal command-registration lifecycle. Other
 Omega plugins must use application authority, not attachments or OP as credentials; arbitrary
 plugins running in the same JVM are trusted code, not sandboxed by this permission boundary.
-Username/UUID resolution, general gameplay scheduling, controlled shutdown/restart,
+General gameplay scheduling, controlled shutdown/restart,
 durable native command coverage, backup/rollback, production load and Folia remain separate gates.
 
 ## Configuration

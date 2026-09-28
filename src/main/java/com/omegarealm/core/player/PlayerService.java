@@ -23,7 +23,7 @@ import static com.omegarealm.core.player.PlayerOperationException.Kind;
  * the worker and clock. One mailbox pump executes all SQL on the repository's I/O thread.
  * Neither futures nor failure callbacks are completed while holding the state monitor.
  */
-public final class PlayerService {
+public final class PlayerService implements PlayerTargetResolver {
 
     private final Object ownership = new Object();
     private final PlayerSessionRepository repository;
@@ -40,6 +40,7 @@ public final class PlayerService {
     private final ArrayDeque<Work> mailbox = new ArrayDeque<>();
     private final ArrayDeque<CommandAuditEvent> shutdownAudits = new ArrayDeque<>();
     private final Set<RoleMutation> roleChanges = new HashSet<>();
+    private final Set<TargetLookup> targetLookups = new HashSet<>();
     private State state = State.STARTING;
     private boolean pumpScheduled;
     private Work inFlight;
@@ -171,6 +172,33 @@ public final class PlayerService {
         }
         kick();
         return mutation.result.minimalCompletionStage();
+    }
+
+    @Override
+    public CompletionStage<PlayerTargetResolution> resolveTarget(PlayerTarget target) {
+        Objects.requireNonNull(target, "target");
+        TargetLookup lookup = new TargetLookup(target);
+        try {
+            synchronized (ownership) {
+                if (state != State.RUNNING) {
+                    return rejected(Kind.UNAVAILABLE);
+                }
+                if (mailboxFull()) {
+                    return rejected(Kind.BUSY);
+                }
+                lookup.deadline = deadlines.schedule(() -> failService(
+                                "Player target lookup exceeded its deadline.",
+                                () -> targetLookups.contains(lookup)),
+                        limits.mutationTimeout().toNanos(), TimeUnit.NANOSECONDS);
+                targetLookups.add(lookup);
+                mailbox.addLast(new Work(null, Operation.TARGET_LOOKUP, null, null, lookup));
+            }
+        } catch (RejectedExecutionException unavailableClock) {
+            failService("Player deadline clock is unavailable.");
+            return rejected(Kind.UNAVAILABLE);
+        }
+        kick();
+        return lookup.result.minimalCompletionStage();
     }
 
     /**
@@ -367,6 +395,7 @@ public final class PlayerService {
         }
         rejectPending(pending);
         rejectRoleChanges();
+        rejectTargetLookups();
     }
 
     /**
@@ -476,6 +505,7 @@ public final class PlayerService {
             Work work;
             boolean checkOwner;
             boolean refreshAuthority;
+            Runnable completion = null;
             synchronized (ownership) {
                 if (state != State.RUNNING) {
                     pumpScheduled = false;
@@ -511,6 +541,7 @@ public final class PlayerService {
                         case QUIT -> quit(work.entry());
                         case ROLE_CHANGE -> changeRoleOnWorker(work.mutation());
                         case COMMAND_AUDIT -> repository.appendCommandAudit(work.commandAudit());
+                        case TARGET_LOOKUP -> completion = resolveTargetOnWorker(work.targetLookup());
                     }
                 }
             } catch (PersistenceException failure) {
@@ -521,6 +552,9 @@ public final class PlayerService {
                 synchronized (ownership) {
                     inFlight = null;
                 }
+            }
+            if (completion != null) {
+                completion.run();
             }
         }
     }
@@ -748,6 +782,23 @@ public final class PlayerService {
         }
     }
 
+    private Runnable resolveTargetOnWorker(TargetLookup lookup) throws PersistenceException {
+        PlayerTargetResolution resolution = repository.resolveTarget(lookup.target);
+        boolean publish;
+        synchronized (ownership) {
+            publish = state == State.RUNNING;
+            targetLookups.remove(lookup);
+            cancel(lookup.deadline);
+        }
+        return () -> {
+            if (publish) {
+                lookup.result.complete(resolution);
+            } else {
+                lookup.result.completeExceptionally(new PlayerOperationException(Kind.UNAVAILABLE));
+            }
+        };
+    }
+
     private void rejectRoleChanges() {
         List<RoleMutation> pending;
         synchronized (ownership) {
@@ -756,6 +807,17 @@ public final class PlayerService {
         }
         for (RoleMutation mutation : pending) {
             mutation.result.completeExceptionally(new PlayerOperationException(Kind.UNAVAILABLE));
+        }
+    }
+
+    private void rejectTargetLookups() {
+        List<TargetLookup> pending;
+        synchronized (ownership) {
+            pending = List.copyOf(targetLookups);
+            targetLookups.clear();
+        }
+        for (TargetLookup lookup : pending) {
+            lookup.result.completeExceptionally(new PlayerOperationException(Kind.UNAVAILABLE));
         }
     }
 
@@ -807,6 +869,7 @@ public final class PlayerService {
         } finally {
             rejectPending(pending);
             rejectRoleChanges();
+            rejectTargetLookups();
         }
     }
 
@@ -823,6 +886,9 @@ public final class PlayerService {
         }
         for (RoleMutation mutation : roleChanges) {
             cancel(mutation.deadline);
+        }
+        for (TargetLookup lookup : targetLookups) {
+            cancel(lookup.deadline);
         }
     }
 
@@ -850,16 +916,31 @@ public final class PlayerService {
     }
 
     private enum Operation {
-        LOAD, JOIN, QUIT, ROLE_CHANGE, COMMAND_AUDIT
+        LOAD, JOIN, QUIT, ROLE_CHANGE, COMMAND_AUDIT, TARGET_LOOKUP
     }
 
-    private record Work(Entry entry, Operation operation, RoleMutation mutation, CommandAuditEvent commandAudit) {
+    private record Work(Entry entry, Operation operation, RoleMutation mutation,
+                        CommandAuditEvent commandAudit, TargetLookup targetLookup) {
         private Work(Entry entry, Operation operation) {
-            this(entry, operation, null, null);
+            this(entry, operation, null, null, null);
         }
 
         private Work(Entry entry, Operation operation, RoleMutation mutation) {
-            this(entry, operation, mutation, null);
+            this(entry, operation, mutation, null, null);
+        }
+
+        private Work(Entry entry, Operation operation, RoleMutation mutation, CommandAuditEvent commandAudit) {
+            this(entry, operation, mutation, commandAudit, null);
+        }
+    }
+
+    private static final class TargetLookup {
+        private final PlayerTarget target;
+        private final CompletableFuture<PlayerTargetResolution> result = new CompletableFuture<>();
+        private ScheduledFuture<?> deadline;
+
+        private TargetLookup(PlayerTarget target) {
+            this.target = target;
         }
     }
 

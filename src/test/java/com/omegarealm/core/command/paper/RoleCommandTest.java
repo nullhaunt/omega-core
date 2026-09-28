@@ -68,7 +68,7 @@ class RoleCommandTest {
                     "role set " + harness.target, "role set " + harness.target + " ADMIN")) {
                 harness.messages.clear();
                 assertEquals(0, harness.dispatcher.execute(command, source));
-                assertEquals(List.of("Ω | Usage: role set <UUID> <PLAYER|MODERATOR|ADMIN|OWNER> <reason>."),
+                assertEquals(List.of("Ω | Usage: role set <name-or-UUID> <PLAYER|MODERATOR|ADMIN|OWNER> <reason>."),
                         harness.messages);
             }
             assertEquals(0, harness.repository.calls);
@@ -80,7 +80,7 @@ class RoleCommandTest {
         try (Harness harness = new Harness()) {
             CommandSourceStack source = source(harness.console, null);
             assertEquals(0, harness.dispatcher.execute("role set 1-1-1-1-1 ADMIN Staff appointment", source));
-            assertEquals(List.of("Ω | Use a canonical UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)."), harness.messages);
+            assertEquals(List.of("Ω | Use a current username or canonical UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)."), harness.messages);
             harness.messages.clear();
             assertEquals(0, harness.dispatcher.execute("role set " + harness.target + " UNKNOWN Staff appointment", source));
             assertEquals(List.of("Ω | Unknown role. Available roles: PLAYER|MODERATOR|ADMIN|OWNER."), harness.messages);
@@ -113,13 +113,76 @@ class RoleCommandTest {
     }
 
     @Test
+    void currentUsernameResolvesToUuidBeforeTheAuditedRoleWrite() throws Exception {
+        try (Harness harness = new Harness()) {
+            String command = "role set targetplayer MODERATOR Staff appointment";
+
+            assertEquals(1, harness.dispatcher.execute(command, source(harness.console, null)));
+            assertTrue(harness.repository.entered.await(2, TimeUnit.SECONDS));
+            assertEquals(List.of("Ω | Player lookup queued."), harness.messages);
+            assertEquals(harness.target, harness.repository.request.targetUuid());
+            assertEquals(Role.MODERATOR, harness.repository.request.role());
+
+            harness.repository.release.countDown();
+            harness.worker.submit(() -> {
+            }).get(2, TimeUnit.SECONDS);
+            harness.replies.remove().run();
+
+            assertTrue(harness.messages.get(1).contains("TargetPlayer (" + harness.target + ")"));
+            assertTrue(harness.auditLogs.stream().anyMatch(log -> log.contains("outcome=CHANGED")
+                    && log.contains("operation=" + harness.repository.request.operationId())));
+        }
+    }
+
+    @Test
+    void missingOrAmbiguousUsernameNeverSubmitsARoleWrite() throws Exception {
+        try (Harness harness = new Harness()) {
+            assertEquals(1, harness.dispatcher.execute(
+                    "role set UnknownPlayer ADMIN Staff appointment", source(harness.console, null)));
+            harness.worker.submit(() -> {
+            }).get(2, TimeUnit.SECONDS);
+            harness.replies.remove().run();
+            assertEquals("Ω | No known player has that current username. No role change was made.",
+                    harness.messages.get(1));
+
+            harness.repository.ambiguousTarget = true;
+            assertEquals(1, harness.dispatcher.execute(
+                    "role set TargetPlayer ADMIN Staff appointment", source(harness.console, null)));
+            harness.worker.submit(() -> {
+            }).get(2, TimeUnit.SECONDS);
+            harness.replies.remove().run();
+            assertEquals("Ω | Multiple players have that stored username. Use a UUID; no role change was made.",
+                    harness.messages.get(3));
+            assertEquals(0, harness.repository.calls);
+        }
+    }
+
+    @Test
+    void selfChangeByUsernameIsDeniedAfterResolution() throws Exception {
+        try (Harness harness = new Harness()) {
+            Player player = harness.player();
+            harness.authorities.put(player, new AuthorizationSnapshot(harness.target, Role.OWNER, 1));
+
+            assertEquals(1, harness.dispatcher.execute(
+                    "role set TargetPlayer ADMIN Self change", source(player, player)));
+            harness.worker.submit(() -> {
+            }).get(2, TimeUnit.SECONDS);
+            harness.playerReplies.remove().run();
+
+            assertEquals(List.of("Ω | Player lookup queued.",
+                    "Ω | You cannot change your own role in-game. Use the local console."), harness.messages);
+            assertEquals(0, harness.repository.calls);
+        }
+    }
+
+    @Test
     void staffUsageAndValidationListOnlyAssignableRoles() throws Exception {
         try (Harness harness = new Harness()) {
             Player player = harness.player();
             CommandSourceStack source = source(player, player);
             harness.authorities.put(player, new AuthorizationSnapshot(UUID.randomUUID(), Role.ADMIN, 1));
             assertEquals(0, harness.dispatcher.execute("role set", source));
-            assertEquals(List.of("Ω | Usage: /role set <UUID> <PLAYER|MODERATOR> <reason>."), harness.messages);
+            assertEquals(List.of("Ω | Usage: /role set <name-or-UUID> <PLAYER|MODERATOR> <reason>."), harness.messages);
             harness.messages.clear();
             assertEquals(0, harness.dispatcher.execute("role set " + harness.target + " UNKNOWN Staff appointment", source));
             assertEquals(List.of("Ω | Unknown role. Available roles: PLAYER|MODERATOR."), harness.messages);
@@ -138,16 +201,17 @@ class RoleCommandTest {
             harness.repository.resultStatus = RoleChangeResult.Status.DENIED;
             assertEquals(1, harness.dispatcher.execute(harness.command, source(player, player)));
             assertTrue(harness.repository.entered.await(2, TimeUnit.SECONDS));
-            assertEquals(List.of("Ω | Role change queued."), harness.messages);
+            assertEquals(List.of("Ω | Player lookup queued."), harness.messages);
             assertTrue(harness.playerReplies.isEmpty());
             harness.repository.release.countDown();
             harness.worker.submit(() -> {
             }).get(2, TimeUnit.SECONDS);
             assertTrue(harness.replies.isEmpty());
-            assertEquals(List.of("Ω | Role change queued."), harness.messages);
+            assertEquals(List.of("Ω | Player lookup queued."), harness.messages);
             harness.playerReplies.remove().run();
-            assertEquals(List.of("Ω | Role change queued.",
-                            "Ω | Role change denied: you cannot manage this target or role with your current authority. No role change was made."),
+            assertEquals(List.of("Ω | Player lookup queued.",
+                            "Ω | Role change denied for TargetPlayer (" + harness.target + ")"
+                                    + ": you cannot manage this target or role with your current authority. No role change was made."),
                     harness.messages);
         }
     }
@@ -157,16 +221,17 @@ class RoleCommandTest {
         try (Harness harness = new Harness()) {
             assertEquals(1, harness.dispatcher.execute(harness.command, source(harness.console, null)));
             assertTrue(harness.repository.entered.await(2, TimeUnit.SECONDS));
-            assertEquals(List.of("Ω | Role change queued."), harness.messages);
+            assertEquals(List.of("Ω | Player lookup queued."), harness.messages);
             assertTrue(harness.replies.isEmpty());
             harness.repository.release.countDown();
             harness.worker.submit(() -> {
             }).get(2, TimeUnit.SECONDS);
-            assertEquals(List.of("Ω | Role change queued."), harness.messages);
+            assertEquals(List.of("Ω | Player lookup queued."), harness.messages);
             assertEquals(1, harness.replies.size());
             harness.replies.remove().run();
             assertTrue(harness.messages.get(1).contains("Role changed:"));
             assertTrue(harness.messages.get(1).contains("revision=1"));
+            assertTrue(harness.messages.get(1).contains("TargetPlayer (" + harness.target + ")"));
             assertFalse(harness.messages.get(1).contains("Staff appointment"));
             assertEquals("Staff appointment", harness.repository.request.reason());
             assertInstanceOf(AuthorizationActor.LocalConsole.class, harness.repository.request.actor());
@@ -255,6 +320,8 @@ class RoleCommandTest {
         private final CommandDispatcher<CommandSourceStack> dispatcher = new CommandDispatcher<>();
 
         private Harness() throws Exception {
+            repository.targetProfile = new PlayerProfile(target, "TargetPlayer",
+                    Instant.parse("2026-09-26T12:00:00Z"), Instant.parse("2026-09-26T12:00:00Z"));
             console = (ConsoleCommandSender) Proxy.newProxyInstance(ConsoleCommandSender.class.getClassLoader(),
                     new Class<?>[]{ConsoleCommandSender.class}, (object, method, arguments) -> {
                         if (method.getName().equals("sendPlainMessage")) {
@@ -340,6 +407,22 @@ class RoleCommandTest {
         private volatile int calls;
         private RoleChangeRequest request;
         private RoleChangeResult.Status resultStatus = RoleChangeResult.Status.CHANGED;
+        private PlayerProfile targetProfile;
+        private boolean ambiguousTarget;
+
+        @Override
+        public PlayerTargetResolution resolveTarget(PlayerTarget target) {
+            if (ambiguousTarget && target instanceof PlayerTarget.ByUsername) {
+                return PlayerTargetResolution.ambiguous();
+            }
+            if (targetProfile != null && (target instanceof PlayerTarget.ByUuid(UUID uuid1)
+                    && targetProfile.uuid().equals(uuid1)
+                    || target instanceof PlayerTarget.ByUsername(String username)
+                    && targetProfile.username().equalsIgnoreCase(username))) {
+                return PlayerTargetResolution.found(targetProfile);
+            }
+            return PlayerTargetResolution.missing();
+        }
 
         @Override
         public void appendCommandAudit(com.omegarealm.core.command.CommandAuditEvent event) {

@@ -85,6 +85,116 @@ class PlayerServiceTest {
     }
 
     @Test
+    void targetResolutionRunsOnlyOnTheOwnedWorkerAndSharesTheBoundedQueue() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        UUID uuid = UUID.randomUUID();
+        PlayerProfile profile = new PlayerProfile(uuid, "Comet", JOINED, JOINED);
+        repository.targetResolution = target -> PlayerTargetResolution.found(profile);
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        PlayerServiceLimits bounded = limits(1, 256, Duration.ofSeconds(3), Duration.ofSeconds(3),
+                Duration.ofSeconds(3), Duration.ofSeconds(30), Duration.ofSeconds(3));
+
+        try (Harness harness = new Harness(repository, bounded)) {
+            harness.worker.execute(() -> {
+                entered.countDown();
+                waitFor(release);
+            });
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            CompletionStage<PlayerTargetResolution> pending = harness.service.resolveTarget(
+                    new PlayerTarget.ByUsername("comet"));
+            assertFalse(pending.toCompletableFuture().isDone());
+            assertFailure(BUSY, harness.service.resolveTarget(new PlayerTarget.ByUuid(uuid)));
+            release.countDown();
+            assertEquals(PlayerTargetResolution.found(profile), await(pending));
+            assertTrue(harness.failures.isEmpty());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void stopRejectsPendingTargetResolutionWithoutPublishingALateResult() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        UUID uuid = UUID.randomUUID();
+        repository.targetResolution = target -> PlayerTargetResolution.found(
+                new PlayerProfile(uuid, "Comet", JOINED, JOINED));
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            harness.worker.execute(() -> {
+                entered.countDown();
+                waitFor(release);
+            });
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            CompletionStage<PlayerTargetResolution> pending = harness.service.resolveTarget(
+                    new PlayerTarget.ByUuid(uuid));
+            harness.service.requestStop(JOINED.plusSeconds(3600));
+            assertFailure(UNAVAILABLE, pending);
+            release.countDown();
+        } finally {
+            release.countDown();
+        }
+        assertFalse(repository.events.contains("target"));
+    }
+
+    @Test
+    void stopRejectsAnInFlightTargetReadEvenWhenTheRepositoryReturnsLater() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        UUID uuid = UUID.randomUUID();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        repository.targetResolution = target -> {
+            entered.countDown();
+            waitFor(release);
+            return PlayerTargetResolution.found(new PlayerProfile(uuid, "Comet", JOINED, JOINED));
+        };
+
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            CompletionStage<PlayerTargetResolution> pending = harness.service.resolveTarget(
+                    new PlayerTarget.ByUsername("Comet"));
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            harness.service.requestStop(JOINED.plusSeconds(3600));
+            assertFailure(UNAVAILABLE, pending);
+            release.countDown();
+            harness.barrier();
+            assertFailure(UNAVAILABLE, pending);
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void targetLookupDeadlineFailsClosedAndDiscardsLateResult() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        UUID uuid = UUID.randomUUID();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        repository.targetResolution = target -> {
+            entered.countDown();
+            waitFor(release);
+            return PlayerTargetResolution.found(new PlayerProfile(uuid, "Comet", JOINED, JOINED));
+        };
+        PlayerServiceLimits shortLookup = limits(64, 256, Duration.ofSeconds(3), Duration.ofSeconds(3),
+                Duration.ofMillis(150), Duration.ofSeconds(30), Duration.ofSeconds(3));
+
+        try (Harness harness = new Harness(repository, shortLookup)) {
+            CompletionStage<PlayerTargetResolution> pending = harness.service.resolveTarget(
+                    new PlayerTarget.ByUsername("Comet"));
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            assertFailure(UNAVAILABLE, pending);
+            assertEquals(List.of("Player target lookup exceeded its deadline."), harness.failures);
+            release.countDown();
+            harness.barrier();
+            assertFailure(UNAVAILABLE, pending);
+            assertFalse(harness.service.isRunning());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
     void commandAuditQueueRejectsOverflowBeforeExecution() throws Exception {
         FakeRepository repository = new FakeRepository();
         CountDownLatch entered = new CountDownLatch(1);
@@ -1018,6 +1128,8 @@ class PlayerServiceTest {
         private volatile Function<UUID, AuthorizationSnapshot> authorization = AuthorizationSnapshot::initial;
         private volatile Function<List<UUID>, Map<UUID, AuthorizationSnapshot>> authorizationBatch;
         private volatile Function<RoleChangeRequest, RoleChangeResult> roleMutation;
+        private volatile Function<PlayerTarget, PlayerTargetResolution> targetResolution =
+                target -> PlayerTargetResolution.missing();
         private volatile Consumer<SessionStart> join = start -> {
         };
         private volatile Runnable end = () -> {
@@ -1052,6 +1164,13 @@ class PlayerServiceTest {
         public RoleChangeResult changeRole(RoleChangeRequest request) {
             assertOwner();
             return roleMutation.apply(request);
+        }
+
+        @Override
+        public PlayerTargetResolution resolveTarget(PlayerTarget target) {
+            assertOwner();
+            events.add("target");
+            return targetResolution.apply(target);
         }
 
         @Override

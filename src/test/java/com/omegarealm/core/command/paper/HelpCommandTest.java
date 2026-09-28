@@ -36,11 +36,11 @@ class HelpCommandTest {
             harness.messages.clear();
             harness.authorities.put(player, new AuthorizationSnapshot(UUID.randomUUID(), Role.ADMIN, 2));
             assertEquals(1, harness.dispatcher.execute("help role", source));
-            assertEquals(List.of("Ω | Manage realm-wide player roles: /role set <UUID> <PLAYER|MODERATOR> <reason>."),
+            assertEquals(List.of("Ω | Manage realm-wide player roles: /role set <name-or-UUID> <PLAYER|MODERATOR> <reason>."),
                     harness.messages);
             harness.messages.clear();
             assertEquals(1, harness.dispatcher.execute("help omegacore:role", source));
-            assertEquals(List.of("Ω | Manage realm-wide player roles: /role set <UUID> <PLAYER|MODERATOR> <reason>."),
+            assertEquals(List.of("Ω | Manage realm-wide player roles: /role set <name-or-UUID> <PLAYER|MODERATOR> <reason>."),
                     harness.messages);
             harness.messages.clear();
             assertEquals(1, harness.dispatcher.execute("help", source));

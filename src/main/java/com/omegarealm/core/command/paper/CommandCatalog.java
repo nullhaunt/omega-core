@@ -51,7 +51,7 @@ public final class CommandCatalog {
     public static String usage(Definition definition, AuthorizationActor actor) {
         String prefix = actor instanceof AuthorizationActor.Player ? "/" : "";
         if (definition == ROLE) {
-            return prefix + "role set <UUID> <" + availableRoles(actor) + "> <reason>.";
+            return prefix + "role set <username|UUID> <" + availableRoles(actor) + "> <reason...>";
         }
         return prefix + "help [command].";
     }
