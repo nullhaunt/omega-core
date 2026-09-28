@@ -143,11 +143,35 @@ and fail through Minecraft's unknown/incomplete command parser. Existing vanilla
 are preserved. Execution rechecks exact, fresh connected authority even after parsing. Clickable
 sign command execution is disabled because Paper elevates its native permissions. Authorized
 native management invocations log actor UUID, role, server, canonical command path, category
-and invocation outcome. Role requests log queued and final outcomes under an operation ID,
-linked to the durable mutation audit ID on commit. `MANAGEMENT` and `STAFF` are separate
-operational log categories; no staff commands exist yet in this gate. These log records are
-not transactionally durable command-history rows. Raw arguments/reasons are omitted from them;
-the existing role-change audit remains transactionally durable.
+and invocation outcome. Significant native commands run by an authorized player or the local
+console also enqueue an argument-free `INVOKED` row in `command_audit` before execution.
+Reviewed native commands are captured at their handler; other console commands are captured
+at Paper's command event, so a parser rejection can still have an invocation row. A full or
+unavailable audit queue denies execution, except that console/RCON `stop` remains available
+with an operational log when persistence is down. Accepted rows use the existing
+ordered I/O worker and are drained on orderly shutdown; a crash or persistence failure between
+native execution and the SQL commit can still leave an invocation without a database row.
+`INVOKED` does not claim
+the native effect succeeded. `MANAGEMENT` and `STAFF` are separate categories for significant
+commands in both the operational log and `command_audit`. Future staff/management handlers
+must use the same audit path; no staff command handlers exist yet. RCON native invocations
+are marked `UNTRUSTED` rather than gaining local-console authority. Everyday player commands
+and command blocks are outside this staff/management audit boundary.
+
+Accepted `/role set` requests write a `QUEUED` row when the existing database worker begins
+processing them. Their final `CHANGED`, `UNCHANGED`, `DENIED` or `NOT_FOUND` row uses the same
+operation ID. A `CHANGED` row links the existing `role_change_audit` record and commits in the
+same transaction as the role and revision. If either audit write fails, the role does not
+change and Omega closes admission; a `QUEUED` row may remain without a final row when the
+outcome is uncertain. The immediate queued message means the request entered the worker
+queue, not that its database row has committed. Invalid input, self-denials and requests
+rejected before worker acceptance remain in the operational log only. The table records the
+target UUID and normalized requested role. Raw command arguments and reasons are absent from
+`command_audit`; the required reason remains in the detailed
+`role_change_audit`. The table is append-only through Omega, with no automatic purge yet.
+Unlike `command_audit`, `role_change_audit` records only committed role transitions, including
+the previous/new role, revision and required reason. Other significant commands such as native
+world settings have no `role_change_audit` row.
 
 One attachment is owned by each exact connection. Reconciliation observes changes every 250 ms
 and applies them on the captured entity scheduler, then refreshes the client tree. Authority
@@ -166,7 +190,7 @@ can publish READY. New commands belong in the normal command-registration lifecy
 Omega plugins must use application authority, not attachments or OP as credentials; arbitrary
 plugins running in the same JVM are trusted code, not sandboxed by this permission boundary.
 Username/UUID resolution, general gameplay scheduling, controlled shutdown/restart,
-universal durable command history, backup/rollback, production load and Folia remain separate gates.
+durable native command coverage, backup/rollback, production load and Folia remain separate gates.
 
 ## Configuration
 

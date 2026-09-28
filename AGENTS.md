@@ -245,6 +245,38 @@ for canonical paths, category, outcome and mutation-audit correlation without ra
 The prior 51-test database suite was not rerun because this gate changed no writer or schema.
 Graphical-client rendering, live deployment, Folia and production load remain unverified.
 
+The V006 command-audit gate adds one append-only `command_audit` table for accepted Omega
+role requests, with shared `STAFF`/`MANAGEMENT` categories. A `QUEUED` event commits on the
+existing owned worker before mutation; the final event commits with any role revision and
+V005 mutation audit. Failure to persist acceptance prevents mutation, and failure to persist
+the final event rolls mutation back. A queued-only event means the final outcome is unknown.
+Operational logs still cover pre-acceptance validation denials and native command invocations;
+native logs prove invocation only. The table records target UUID and validated requested role;
+neither raw arguments nor reasons enter it.
+There is no new pool, executor, timer, configuration key, purge job or automatic retention.
+Username/UUID resolution is the next separate gate.
+
+Java 25 `test integrationTest build --offline --console=plain` passed with 276 unit and
+54 native PostgreSQL tests. A fresh disposable Paper 26.3 build-49/PostgreSQL fixture in
+`build/command-audit-smoke-final` verified paired events, all six mutation links, player feedback,
+command masking, expiry and clean shutdown. Live deployment, graphical-client rendering,
+Folia and production load remain unverified.
+
+The command-audit scope now includes significant native staff/management commands. Reviewed
+native handlers enqueue an argument-free `INVOKED` event before execution; other local-console
+and RCON native submissions enter through Paper's server-command event. The existing ordered
+worker writes them to V006. A full/unavailable queue denies execution, except that `stop`
+remains available with an operational log when persistence is down. Normal shutdown drains
+accepted pending events within its cleanup deadline. A crash between native effect and SQL
+commit can leave a gap; `INVOKED` never proves that the effect succeeded. Role mutations retain
+their paired queued/final events and atomic V005 link. Routine player and command-block commands
+are outside this table; future significant handlers must use the shared audit entry point.
+Java 25 checks passed with 280 unit and 55 native PostgreSQL tests. A fresh disposable Paper
+26.3 build-49/PostgreSQL run under `build/significant-command-audit-smoke-2` verified native
+player rows, a console `stop` row after clean shutdown, role links, masking and expiry. The
+emergency unaudited `stop` fallback was source-checked but not exercised on Paper. Live
+deployment, graphical-client rendering, Folia and production load remain unverified.
+
 The earlier snapshot below records bootstrap evidence only; it is not current feature status.
 
 ## Earlier handoff snapshot — 2026-09-26

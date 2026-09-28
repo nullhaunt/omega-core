@@ -549,6 +549,11 @@ class OmegaRuntimeTest {
     private static class TestRepository implements PlayerSessionRepository {
 
         @Override
+        public void appendCommandAudit(com.omegarealm.core.command.CommandAuditEvent event) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
         public LoadedPlayer loadPlayer(UUID uuid) {
             return new LoadedPlayer(findPlayer(uuid), AuthorizationSnapshot.initial(uuid));
         }

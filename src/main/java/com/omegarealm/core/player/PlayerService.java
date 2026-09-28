@@ -4,6 +4,8 @@ import com.omegarealm.core.authorization.AuthorizationRefreshLimits;
 import com.omegarealm.core.authorization.AuthorizationSnapshot;
 import com.omegarealm.core.authorization.RoleChangeRequest;
 import com.omegarealm.core.authorization.RoleChangeResult;
+import com.omegarealm.core.command.CommandAuditEvent;
+import com.omegarealm.core.command.CommandAuditEvent.Outcome;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -36,6 +38,7 @@ public final class PlayerService {
     private final Map<UUID, Entry> attempts = new HashMap<>();
     private final Map<UUID, Entry> currentPlayers = new HashMap<>();
     private final ArrayDeque<Work> mailbox = new ArrayDeque<>();
+    private final ArrayDeque<CommandAuditEvent> shutdownAudits = new ArrayDeque<>();
     private final Set<RoleMutation> roleChanges = new HashSet<>();
     private State state = State.STARTING;
     private boolean pumpScheduled;
@@ -168,6 +171,27 @@ public final class PlayerService {
         }
         kick();
         return mutation.result.minimalCompletionStage();
+    }
+
+    /**
+     * Accepts an invocation without blocking a Paper command thread on SQL. Rejection means
+     * the command handler must not run. Accepted writes stay ordered with other persistence.
+     */
+    public boolean queueCommandAudit(CommandAuditEvent event) {
+        Objects.requireNonNull(event, "event");
+        if (event.outcome() != Outcome.INVOKED) {
+            throw new IllegalArgumentException("Only command invocations use the shared queue.");
+        }
+        synchronized (ownership) {
+            if (state != State.RUNNING || mailboxFull()) {
+                return false;
+            }
+            mailbox.addLast(new Work(null, Operation.COMMAND_AUDIT, null, event));
+        }
+        kick();
+        synchronized (ownership) {
+            return state == State.RUNNING;
+        }
     }
 
     private boolean authorityPhase(Entry entry) {
@@ -333,6 +357,11 @@ public final class PlayerService {
             stoppedAt = at.truncatedTo(ChronoUnit.MICROS);
             cleanupDeadline = System.nanoTime() + limits.cleanupTimeout().toNanos();
             stopTimers();
+            for (Work work : mailbox) {
+                if (work.commandAudit() != null) {
+                    shutdownAudits.addLast(work.commandAudit());
+                }
+            }
             mailbox.clear();
             pending = new ArrayList<>(attempts.values());
         }
@@ -347,6 +376,7 @@ public final class PlayerService {
         requireIoThread();
         requestStop(time.instant());
         List<Entry> draining;
+        List<CommandAuditEvent> audits;
         synchronized (ownership) {
             if (state == State.CLOSED) {
                 return cleanlyClosed;
@@ -355,6 +385,8 @@ public final class PlayerService {
                 throw new IllegalStateException("Player cleanup cannot run inside a mailbox operation.");
             }
             draining = new ArrayList<>(attempts.values());
+            audits = new ArrayList<>(shutdownAudits);
+            shutdownAudits.clear();
         }
 
         boolean interrupted = Thread.interrupted();
@@ -380,6 +412,20 @@ public final class PlayerService {
                     }
                 } catch (PersistenceException | RuntimeException failure) {
                     logger.severe("Player session cleanup failed; unfinished sessions require recovery.");
+                    clean = false;
+                    break;
+                }
+            }
+            for (CommandAuditEvent audit : audits) {
+                if (System.nanoTime() - cleanupDeadline >= 0) {
+                    logger.severe("Command audit cleanup exceeded its deadline; inspect operational logs.");
+                    clean = false;
+                    break;
+                }
+                try {
+                    repository.appendCommandAudit(audit);
+                } catch (PersistenceException | RuntimeException failure) {
+                    logger.severe("Command audit cleanup failed; inspect operational logs.");
                     clean = false;
                     break;
                 }
@@ -464,6 +510,7 @@ public final class PlayerService {
                         case JOIN -> join(work.entry());
                         case QUIT -> quit(work.entry());
                         case ROLE_CHANGE -> changeRoleOnWorker(work.mutation());
+                        case COMMAND_AUDIT -> repository.appendCommandAudit(work.commandAudit());
                     }
                 }
             } catch (PersistenceException failure) {
@@ -803,12 +850,16 @@ public final class PlayerService {
     }
 
     private enum Operation {
-        LOAD, JOIN, QUIT, ROLE_CHANGE
+        LOAD, JOIN, QUIT, ROLE_CHANGE, COMMAND_AUDIT
     }
 
-    private record Work(Entry entry, Operation operation, RoleMutation mutation) {
+    private record Work(Entry entry, Operation operation, RoleMutation mutation, CommandAuditEvent commandAudit) {
         private Work(Entry entry, Operation operation) {
-            this(entry, operation, null);
+            this(entry, operation, null, null);
+        }
+
+        private Work(Entry entry, Operation operation, RoleMutation mutation) {
+            this(entry, operation, mutation, null);
         }
     }
 

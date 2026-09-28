@@ -18,7 +18,6 @@ import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 /**
@@ -27,11 +26,11 @@ import java.util.function.Predicate;
 final class GuardedCommandTree<S> {
 
     private final Predicate<S> allowed;
-    private final Consumer<CommandContext<S>> invoked;
+    private final Predicate<CommandContext<S>> invoked;
     private final Map<CommandNode<S>, CommandNode<S>> copied = new IdentityHashMap<>();
     private final Set<CommandNode<S>> visiting = Collections.newSetFromMap(new IdentityHashMap<>());
 
-    GuardedCommandTree(Predicate<S> allowed, Consumer<CommandContext<S>> invoked) {
+    GuardedCommandTree(Predicate<S> allowed, Predicate<CommandContext<S>> invoked) {
         this.allowed = allowed;
         this.invoked = invoked;
     }
@@ -100,7 +99,9 @@ final class GuardedCommandTree<S> {
         }
         return context -> {
             check(context);
-            invoked.accept(context);
+            if (!invoked.test(context)) {
+                return 0;
+            }
             return command.run(context);
         };
     }

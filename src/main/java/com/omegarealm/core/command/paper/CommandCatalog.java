@@ -2,6 +2,7 @@ package com.omegarealm.core.command.paper;
 
 import com.omegarealm.core.authorization.AuthorizationActor;
 import com.omegarealm.core.authorization.Role;
+import com.omegarealm.core.command.CommandAuditEvent.Category;
 
 import java.util.Arrays;
 import java.util.List;
@@ -19,7 +20,7 @@ public final class CommandCatalog {
     public static final Definition HELP = new Definition("help", "Show available commands", Role.PLAYER,
             null, List.of());
     public static final Definition ROLE = new Definition("role", "Manage realm-wide player roles", Role.ADMIN,
-            CommandAudit.Category.MANAGEMENT, List.of());
+            Category.MANAGEMENT, List.of());
 
     private static final List<Definition> DEFINITIONS = List.of(HELP, ROLE);
     private static final Map<String, Definition> LABELS = DEFINITIONS.stream()
@@ -56,7 +57,7 @@ public final class CommandCatalog {
     }
 
     public record Definition(String name, String description, Role minimumRole,
-                             CommandAudit.Category category, List<String> aliases) {
+                             Category category, List<String> aliases) {
 
         public Set<String> labels() {
             var labels = new java.util.HashSet<String>();

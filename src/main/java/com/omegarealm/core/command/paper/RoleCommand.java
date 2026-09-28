@@ -8,6 +8,7 @@ import com.omegarealm.core.authorization.AuthorizationActor;
 import com.omegarealm.core.authorization.Role;
 import com.omegarealm.core.authorization.RoleChangeRequest;
 import com.omegarealm.core.authorization.RoleChangeResult;
+import com.omegarealm.core.command.CommandAuditEvent.Outcome;
 import com.omegarealm.core.player.PlayerService;
 import com.omegarealm.core.scheduler.OmegaScheduler;
 import io.papermc.paper.command.brigadier.CommandSourceStack;
@@ -47,7 +48,7 @@ public final class RoleCommand {
         this.playerReply = Objects.requireNonNull(playerReply, "playerReply");
     }
 
-    private void record(AuthorizationActor actor, CommandAudit.Outcome outcome,
+    private void record(AuthorizationActor actor, Outcome outcome,
                         UUID operationId, UUID mutationAuditId) {
         audit.record(actor, CommandCatalog.ROLE.category(), "role.set", outcome, operationId, mutationAuditId);
     }
@@ -99,7 +100,7 @@ public final class RoleCommand {
         } catch (IllegalArgumentException invalid) {
             CommandMessages.send(sender, CommandMessages.Kind.ERROR,
                     "Use a canonical UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).");
-            record(actor, CommandAudit.Outcome.DENIED, operationId, null);
+            record(actor, Outcome.DENIED, operationId, null);
             return 0;
         }
 
@@ -109,17 +110,18 @@ public final class RoleCommand {
         } catch (IllegalArgumentException invalid) {
             CommandMessages.send(sender, CommandMessages.Kind.ERROR,
                     "Unknown role. Available roles: " + CommandCatalog.availableRoles(actor) + ".");
-            record(actor, CommandAudit.Outcome.DENIED, operationId, null);
+            record(actor, Outcome.DENIED, operationId, null);
             return 0;
         }
 
         RoleChangeRequest request;
         try {
-            request = new RoleChangeRequest(actor, uuid, role, StringArgumentType.getString(context, "reason"));
+            request = new RoleChangeRequest(actor, uuid, role,
+                    StringArgumentType.getString(context, "reason"), operationId);
         } catch (IllegalArgumentException invalid) {
             CommandMessages.send(sender, CommandMessages.Kind.ERROR,
                     "A reason of 1-512 characters without control characters is required.");
-            record(actor, CommandAudit.Outcome.DENIED, operationId, null);
+            record(actor, Outcome.DENIED, operationId, null);
             return 0;
         }
 
@@ -128,20 +130,20 @@ public final class RoleCommand {
         if (actor instanceof AuthorizationActor.Player player && player.uuid().equals(uuid)) {
             CommandMessages.send(sender, CommandMessages.Kind.ERROR,
                     "You cannot change your own role in-game. Use the local console.");
-            record(actor, CommandAudit.Outcome.DENIED, operationId, null);
+            record(actor, Outcome.DENIED, operationId, null);
             return 0;
         }
         if (!CommandCatalog.canAssign(actor, role)) {
             CommandMessages.send(sender, CommandMessages.Kind.ERROR,
                     "Your role can assign " + CommandCatalog.availableRoles(actor)
                             + ". Only the local console can assign OWNER.");
-            record(actor, CommandAudit.Outcome.DENIED, operationId, null);
+            record(actor, Outcome.DENIED, operationId, null);
             return 0;
         }
         if (!access.ready()) {
             CommandMessages.send(sender, CommandMessages.Kind.ERROR,
                     "Omega Core is unavailable; no role change was accepted.");
-            record(actor, CommandAudit.Outcome.FAILED, operationId, null);
+            record(actor, Outcome.FAILED, operationId, null);
             return 0;
         }
         PlayerService service;
@@ -150,12 +152,12 @@ public final class RoleCommand {
         } catch (IllegalStateException unavailable) {
             CommandMessages.send(sender, CommandMessages.Kind.ERROR,
                     "Omega Core is unavailable; no role change was accepted.");
-            record(actor, CommandAudit.Outcome.FAILED, operationId, null);
+            record(actor, Outcome.FAILED, operationId, null);
             return 0;
         }
         CompletionStage<RoleChangeResult> pending = service.changeRole(request);
         if (!pending.toCompletableFuture().isCompletedExceptionally()) {
-            record(actor, CommandAudit.Outcome.QUEUED, operationId, null);
+            record(actor, Outcome.QUEUED, operationId, null);
             CommandMessages.send(sender, CommandMessages.Kind.INFO, "Role change queued.");
         }
         pending.whenComplete((result, failure) -> {
@@ -163,9 +165,9 @@ public final class RoleCommand {
             // Once accepted, persistence may finish after disconnect; its audit remains durable.
             try {
                 if (failure != null) {
-                    record(actor, CommandAudit.Outcome.FAILED, operationId, null);
+                    record(actor, Outcome.FAILED, operationId, null);
                 } else {
-                    record(actor, CommandAudit.Outcome.valueOf(result.status().name()),
+                    record(actor, Outcome.valueOf(result.status().name()),
                             operationId, result.auditId());
                 }
                 Runnable reply = () -> {

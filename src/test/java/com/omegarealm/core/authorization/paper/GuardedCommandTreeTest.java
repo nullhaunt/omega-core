@@ -21,6 +21,7 @@ class GuardedCommandTreeTest {
         var original = LiteralArgumentBuilder.<Boolean>literal("help").executes(context -> calls.incrementAndGet()).build();
         var dispatcher = new CommandDispatcher<Boolean>();
         dispatcher.getRoot().addChild(new GuardedCommandTree<Boolean>(Boolean::booleanValue, source -> {
+            return true;
         }).copy(original));
         assertThrows(CommandSyntaxException.class, () -> dispatcher.execute("help", false));
         assertTrue(dispatcher.getCompletionSuggestions(dispatcher.parse("he", false)).get().isEmpty());
@@ -38,6 +39,7 @@ class GuardedCommandTreeTest {
                         .executes(context -> calls.incrementAndGet())).build();
         var dispatcher = new CommandDispatcher<String>();
         dispatcher.getRoot().addChild(new GuardedCommandTree<String>(source -> allowed.get(), source -> {
+            return true;
         }).copy(original));
         var execution = dispatcher.parse("time day", "player");
         var completion = dispatcher.parse("time d", "player");
@@ -57,6 +59,7 @@ class GuardedCommandTreeTest {
         var alias = LiteralArgumentBuilder.<String>literal("minecraft:weather").redirect(original).build();
         var dispatcher = new CommandDispatcher<String>();
         dispatcher.getRoot().addChild(new GuardedCommandTree<String>(source -> allowed.get(), source -> {
+            return true;
         }).copy(alias));
         assertEquals(7, dispatcher.execute("minecraft:weather clear", "player"));
         var parsed = dispatcher.parse("minecraft:weather clear", "player");
@@ -74,6 +77,7 @@ class GuardedCommandTreeTest {
                         .executes(context -> 3)).build();
         var dispatcher = new CommandDispatcher<String>();
         dispatcher.getRoot().addChild(new GuardedCommandTree<String>(source -> true, source -> {
+            return true;
         })
                 .branches(original, Set.of("fixlight", "version"), source -> source.equals("player")));
         assertEquals(3, dispatcher.execute("paper fixlight 2", "player"));
@@ -90,11 +94,27 @@ class GuardedCommandTreeTest {
         var original = LiteralArgumentBuilder.<Boolean>literal("tool").requires(Boolean::booleanValue)
                 .executes(context -> 8).build();
         var dispatcher = new CommandDispatcher<Boolean>();
-        dispatcher.getRoot().addChild(new GuardedCommandTree<Boolean>(source -> true, source -> invoked.incrementAndGet())
+        dispatcher.getRoot().addChild(new GuardedCommandTree<Boolean>(source -> true, source -> {
+            invoked.incrementAndGet();
+            return true;
+        })
                 .copy(original));
         assertThrows(CommandSyntaxException.class, () -> dispatcher.execute("tool", false));
         assertEquals(0, invoked.get());
         assertEquals(8, dispatcher.execute("tool", true));
         assertEquals(1, invoked.get());
+    }
+
+    @Test
+    void unavailableAuditPreventsNativeHandlerExecution() throws Exception {
+        AtomicInteger effects = new AtomicInteger();
+        var original = LiteralArgumentBuilder.<Boolean>literal("weather")
+                .executes(context -> effects.incrementAndGet()).build();
+        var dispatcher = new CommandDispatcher<Boolean>();
+        dispatcher.getRoot().addChild(new GuardedCommandTree<Boolean>(source -> true, context -> false)
+                .copy(original));
+
+        assertEquals(0, dispatcher.execute("weather", true));
+        assertEquals(0, effects.get());
     }
 }

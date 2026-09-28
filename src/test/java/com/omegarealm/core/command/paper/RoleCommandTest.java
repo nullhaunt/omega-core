@@ -172,7 +172,10 @@ class RoleCommandTest {
             assertInstanceOf(AuthorizationActor.LocalConsole.class, harness.repository.request.actor());
             assertTrue(harness.auditLogs.stream().anyMatch(log -> log.contains("category=MANAGEMENT")
                     && log.contains("command=role.set") && log.contains("outcome=CHANGED")
-                    && log.contains("mutation_audit=")));
+                    && log.contains("mutation_audit=")
+                    && log.contains("operation=" + harness.repository.request.operationId())));
+            assertTrue(harness.auditLogs.stream().anyMatch(log -> log.contains("outcome=QUEUED")
+                    && log.contains("operation=" + harness.repository.request.operationId())));
             assertTrue(harness.auditLogs.stream().noneMatch(log -> log.contains("Staff appointment")));
         }
     }
@@ -299,7 +302,7 @@ class RoleCommandTest {
             };
             CommandAccess access = new CommandAccess(() -> console, () -> RuntimeState.READY,
                     player -> Optional.ofNullable(authorities.get(player)));
-            CommandAudit audit = new CommandAudit(logger, "unit-server");
+            CommandAudit audit = new CommandAudit(logger, "unit-server", () -> service);
             dispatcher.getRoot().addChild(new RoleCommand(access, () -> service, scheduler,
                     audit, logger, () -> fail("Unexpected scheduling failure"),
                     (player, reply) -> playerReplies.add(reply)).node());
@@ -337,6 +340,11 @@ class RoleCommandTest {
         private volatile int calls;
         private RoleChangeRequest request;
         private RoleChangeResult.Status resultStatus = RoleChangeResult.Status.CHANGED;
+
+        @Override
+        public void appendCommandAudit(com.omegarealm.core.command.CommandAuditEvent event) {
+            throw new UnsupportedOperationException();
+        }
 
         @Override
         public RoleChangeResult changeRole(RoleChangeRequest request) throws PersistenceException {

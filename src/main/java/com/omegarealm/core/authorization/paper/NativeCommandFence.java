@@ -5,11 +5,15 @@ import com.mojang.brigadier.tree.CommandNode;
 import com.mojang.brigadier.tree.LiteralCommandNode;
 import com.omegarealm.core.authorization.AuthorizationActor;
 import com.omegarealm.core.authorization.NativeCommandCatalog;
+import com.omegarealm.core.command.CommandAuditEvent;
+import com.omegarealm.core.command.CommandAuditEvent.Category;
+import com.omegarealm.core.command.CommandAuditEvent.Outcome;
 import com.omegarealm.core.command.paper.*;
 import io.papermc.paper.ServerBuildInfo;
 import io.papermc.paper.event.player.PlayerSignCommandPreprocessEvent;
 import net.kyori.adventure.text.Component;
 import net.minecraft.commands.CommandSourceStack;
+import org.bukkit.command.RemoteConsoleCommandSender;
 import org.bukkit.craftbukkit.CraftServer;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -137,18 +141,26 @@ public final class NativeCommandFence implements Listener {
                 .map(snapshot -> NativeCommandCatalog.allows(snapshot.role(), label)).orElse(false);
     }
 
-    private void record(String label, CommandContext<CommandSourceStack> context) {
+    private boolean record(String label, CommandContext<CommandSourceStack> context) {
         if (commands.owns(label)) {
-            return;
+            return true;
         }
         CommandSourceStack source = context.getSource();
+        if (!allows(label, source)) {
+            return false;
+        }
         AuthorizationActor actor;
         if (source.getSender() instanceof Player player) {
             actor = permissions.authorization(player).map(snapshot -> (AuthorizationActor) snapshot.actor()).orElse(null);
         } else if (source.getSender() == plugin.getServer().getConsoleSender() && source.getExecutor() == null) {
             actor = new AuthorizationActor.LocalConsole();
+        } else if (source.getSender() instanceof RemoteConsoleCommandSender) {
+            actor = new AuthorizationActor.Untrusted();
         } else {
             actor = null;
+        }
+        if (source.getSender() instanceof Player && actor == null) {
+            return false;
         }
         if (actor != null) {
             StringBuilder action = new StringBuilder(NativeCommandCatalog.canonicalRoot(label));
@@ -163,9 +175,16 @@ public final class NativeCommandFence implements Listener {
                     action.append('.').append(NativeCommandCatalog.canonicalBranch(label, literal.getName()));
                 }
             }
-            audit.record(actor, CommandAudit.Category.MANAGEMENT, action.toString(),
-                    CommandAudit.Outcome.INVOKED, UUID.randomUUID(), null);
+            CommandAuditEvent event = new CommandAuditEvent(UUID.randomUUID(), actor,
+                    Category.MANAGEMENT, action.toString(), Outcome.INVOKED,
+                    null, null, null);
+            if (!audit.recordInvocation(event)) {
+                CommandMessages.send(source.getSender(), CommandMessages.Kind.ERROR,
+                        "Command audit is unavailable; this command was not executed.");
+                return false;
+            }
         }
+        return true;
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -177,6 +196,9 @@ public final class NativeCommandFence implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onServerCommand(ServerCommandEvent event) {
+        if (event.getCommand().isBlank()) {
+            return;
+        }
         String label = event.getCommand().stripLeading().split("\\s+", 2)[0];
         String root = NativeCommandCatalog.root(label);
         if (root.equals("op")) {
@@ -187,6 +209,31 @@ public final class NativeCommandFence implements Listener {
             event.setCancelled(true);
             CommandMessages.send(event.getSender(), CommandMessages.Kind.ERROR,
                     "Omega does not support reload. Restart the server to apply changes.");
+        } else if (!commands.owns(label) && !NativeCommandCatalog.reviewed(label)
+                && (event.getSender() == plugin.getServer().getConsoleSender()
+                || event.getSender() instanceof RemoteConsoleCommandSender)) {
+            String path = NativeCommandCatalog.canonicalRoot(label);
+            if (!path.matches("[a-z][a-z0-9._-]{0,127}")) {
+                event.setCancelled(true);
+                CommandMessages.send(event.getSender(), CommandMessages.Kind.ERROR,
+                        "Command audit cannot identify this command; it was not executed.");
+                return;
+            }
+            AuthorizationActor actor = event.getSender() == plugin.getServer().getConsoleSender()
+                    ? new AuthorizationActor.LocalConsole() : new AuthorizationActor.Untrusted();
+            CommandAuditEvent auditEvent = new CommandAuditEvent(UUID.randomUUID(), actor,
+                    Category.MANAGEMENT, path, Outcome.INVOKED, null, null, null);
+            if (!audit.recordInvocation(auditEvent)) {
+                if (root.equals("stop")) {
+                    // Shutdown must remain available even when persistence itself is down.
+                    audit.record(actor, Category.MANAGEMENT, path, Outcome.INVOKED,
+                            auditEvent.operationId(), null);
+                    return;
+                }
+                event.setCancelled(true);
+                CommandMessages.send(event.getSender(), CommandMessages.Kind.ERROR,
+                        "Command audit is unavailable; this command was not executed.");
+            }
         }
     }
 }

@@ -1,6 +1,9 @@
 package com.omegarealm.core.player;
 
 import com.omegarealm.core.authorization.*;
+import com.omegarealm.core.command.CommandAuditEvent;
+import com.omegarealm.core.command.CommandAuditEvent.Category;
+import com.omegarealm.core.command.CommandAuditEvent.Outcome;
 import com.omegarealm.core.database.Database;
 
 import java.sql.Connection;
@@ -189,9 +192,19 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
     public RoleChangeResult changeRole(RoleChangeRequest request) throws PersistenceException {
         Objects.requireNonNull(request, "request");
         requireRecovered();
+
+        // This event survives a later failed mutation. No role write begins unless it commits.
+        transaction("command audit acceptance", () -> {
+            insertCommandAudit(new CommandAuditEvent(request.operationId(), request.actor(),
+                    Category.MANAGEMENT, "role.set", Outcome.QUEUED,
+                    request.targetUuid(), request.role(), null));
+            return null;
+        });
+
         return transaction("role change", () -> {
             if (request.actor() instanceof AuthorizationActor.Untrusted) {
-                return new RoleChangeResult(RoleChangeResult.Status.DENIED, null, null);
+                return auditedRoleResult(request, request.actor(),
+                        new RoleChangeResult(RoleChangeResult.Status.DENIED, null, null));
             }
             List<UUID> identities = request.actor() instanceof AuthorizationActor.Player actor
                     ? List.of(request.targetUuid(), actor.uuid()) : List.of(request.targetUuid());
@@ -202,23 +215,27 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
                 // Validate profile/authority in one statement. A first join can commit
                 // between statements; it must not be mistaken for a missing role row.
                 selectLoadedPlayer(request.targetUuid());
-                return new RoleChangeResult(RoleChangeResult.Status.NOT_FOUND, null, null);
+                return auditedRoleResult(request, request.actor(),
+                        new RoleChangeResult(RoleChangeResult.Status.NOT_FOUND, null, null));
             }
             AuthorizationActor authoritativeActor = request.actor();
             if (request.actor() instanceof AuthorizationActor.Player actor) {
                 AuthorizationSnapshot authority = locked.get(actor.uuid());
                 if (authority == null) {
                     selectLoadedPlayer(actor.uuid());
-                    return new RoleChangeResult(RoleChangeResult.Status.DENIED, null, null);
+                    return auditedRoleResult(request, request.actor(),
+                            new RoleChangeResult(RoleChangeResult.Status.DENIED, null, null));
                 }
                 authoritativeActor = new AuthorizationActor.Player(actor.uuid(), authority.role());
             }
             if (!AuthorizationPolicy.canChangeRole(authoritativeActor,
                     new AuthorizationActor.Player(target.playerUuid(), target.role()), request.role())) {
-                return new RoleChangeResult(RoleChangeResult.Status.DENIED, null, null);
+                return auditedRoleResult(request, authoritativeActor,
+                        new RoleChangeResult(RoleChangeResult.Status.DENIED, null, null));
             }
             if (target.role() == request.role()) {
-                return new RoleChangeResult(RoleChangeResult.Status.UNCHANGED, target, null);
+                return auditedRoleResult(request, authoritativeActor,
+                        new RoleChangeResult(RoleChangeResult.Status.UNCHANGED, target, null));
             }
             long revision = Math.addExact(target.revision(), 1);
             UUID auditId = UUID.randomUUID();
@@ -252,9 +269,57 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
                 statement.setString(11, request.reason());
                 statement.executeUpdate();
             }
-            return new RoleChangeResult(RoleChangeResult.Status.CHANGED,
-                    new AuthorizationSnapshot(target.playerUuid(), request.role(), revision), auditId);
+            return auditedRoleResult(request, authoritativeActor,
+                    new RoleChangeResult(RoleChangeResult.Status.CHANGED,
+                            new AuthorizationSnapshot(target.playerUuid(), request.role(), revision), auditId));
         });
+    }
+
+    private RoleChangeResult auditedRoleResult(RoleChangeRequest request, AuthorizationActor actor,
+                                               RoleChangeResult result) throws SQLException {
+        insertCommandAudit(new CommandAuditEvent(request.operationId(), actor, Category.MANAGEMENT,
+                "role.set", Outcome.valueOf(result.status().name()),
+                request.targetUuid(), request.role(), result.auditId()));
+        return result;
+    }
+
+    @Override
+    public void appendCommandAudit(CommandAuditEvent event) throws PersistenceException {
+        Objects.requireNonNull(event, "event");
+        requireRecovered();
+        transaction("command audit", () -> {
+            insertCommandAudit(event);
+            return null;
+        });
+    }
+
+    private void insertCommandAudit(CommandAuditEvent event) throws SQLException {
+        try (PreparedStatement statement = prepare(connection, """
+                INSERT INTO command_audit
+                    (id, operation_id, server_id, category, command_path, actor_kind,
+                     actor_uuid, actor_role, target_uuid, requested_role, outcome, role_change_audit_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            statement.setObject(1, UUID.randomUUID());
+            statement.setObject(2, event.operationId());
+            statement.setString(3, serverId);
+            statement.setString(4, event.category().name());
+            statement.setString(5, event.commandPath());
+            String actorKind = switch (event.actor()) {
+                case AuthorizationActor.LocalConsole ignored -> "LOCAL_CONSOLE";
+                case AuthorizationActor.Player ignored -> "PLAYER";
+                case AuthorizationActor.Untrusted ignored -> "UNTRUSTED";
+            };
+            statement.setString(6, actorKind);
+            statement.setObject(7, event.actor() instanceof AuthorizationActor.Player actor ? actor.uuid() : null);
+            statement.setString(8, event.actor() instanceof AuthorizationActor.Player actor
+                    ? actor.role().name() : null);
+            statement.setObject(9, event.targetUuid());
+            statement.setString(10, event.requestedRole() == null ? null : event.requestedRole().name());
+            statement.setString(11, event.outcome().name());
+            statement.setObject(12, event.roleChangeAuditId());
+            statement.executeUpdate();
+        }
     }
 
     @Override

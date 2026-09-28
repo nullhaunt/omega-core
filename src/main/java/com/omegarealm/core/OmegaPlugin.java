@@ -47,7 +47,7 @@ public final class OmegaPlugin extends JavaPlugin {
             playerPermissions = new PlayerPermissionAdapter(this, playerConnections::authorization, runtime::failPlayerHandling);
             CommandAccess commandAccess = new CommandAccess(getServer()::getConsoleSender,
                     this::state, playerPermissions::authorization);
-            CommandAudit commandAudit = new CommandAudit(getLogger(), config.server().id());
+            CommandAudit commandAudit = new CommandAudit(getLogger(), config.server().id(), runtime::players);
             OmegaCommands commands = new OmegaCommands(commandAccess, runtime::players,
                     scheduler, commandAudit, getLogger(), this::schedulingFailed, playerConnections::reply);
             nativeCommands = new NativeCommandFence(this, playerPermissions, commandAccess,

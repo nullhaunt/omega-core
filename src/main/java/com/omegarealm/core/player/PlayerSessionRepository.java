@@ -3,6 +3,7 @@ package com.omegarealm.core.player;
 import com.omegarealm.core.authorization.AuthorizationSnapshot;
 import com.omegarealm.core.authorization.RoleChangeRequest;
 import com.omegarealm.core.authorization.RoleChangeResult;
+import com.omegarealm.core.command.CommandAuditEvent;
 
 import java.time.Instant;
 import java.util.List;
@@ -27,9 +28,15 @@ public interface PlayerSessionRepository extends AutoCloseable {
     Map<UUID, AuthorizationSnapshot> loadAuthorizations(List<UUID> playerUuids) throws PersistenceException;
 
     /**
-     * Rechecks authoritative actor/target roles and records changes atomically.
+     * Persists acceptance first, then rechecks authoritative actor/target roles and
+     * commits the outcome event with any role change and mutation audit.
      */
     RoleChangeResult changeRole(RoleChangeRequest request) throws PersistenceException;
+
+    /**
+     * Appends one significant command invocation on the owned I/O worker.
+     */
+    void appendCommandAudit(CommandAuditEvent event) throws PersistenceException;
 
     Optional<PlayerProfile> findPlayer(UUID playerUuid) throws PersistenceException;
 

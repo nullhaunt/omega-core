@@ -1,6 +1,9 @@
 package com.omegarealm.core.player;
 
 import com.omegarealm.core.authorization.*;
+import com.omegarealm.core.command.CommandAuditEvent;
+import com.omegarealm.core.command.CommandAuditEvent.Category;
+import com.omegarealm.core.command.CommandAuditEvent.Outcome;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -74,6 +77,76 @@ class PlayerServiceTest {
 
     private static AuthorizationRefreshLimits refreshLimits() {
         return new AuthorizationRefreshLimits(Duration.ofMillis(40), Duration.ofMillis(300), 2);
+    }
+
+    private static CommandAuditEvent invocation(String path) {
+        return new CommandAuditEvent(UUID.randomUUID(), new AuthorizationActor.LocalConsole(),
+                Category.MANAGEMENT, path, Outcome.INVOKED, null, null, null);
+    }
+
+    @Test
+    void commandAuditQueueRejectsOverflowBeforeExecution() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        PlayerServiceLimits bounded = limits(1, 256, Duration.ofSeconds(3), Duration.ofSeconds(3),
+                Duration.ofSeconds(3), Duration.ofSeconds(30), Duration.ofSeconds(3));
+
+        try (Harness harness = new Harness(repository, bounded)) {
+            harness.worker.execute(() -> {
+                entered.countDown();
+                waitFor(release);
+            });
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            CommandAuditEvent accepted = invocation("time.set");
+            assertTrue(harness.service.queueCommandAudit(accepted));
+            assertFalse(harness.service.queueCommandAudit(invocation("weather.clear")));
+            release.countDown();
+            harness.barrier();
+            assertEquals(List.of(accepted), repository.audits);
+            assertTrue(harness.failures.isEmpty());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void orderlyStopDrainsAcceptedCommandAudit() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CommandAuditEvent accepted = invocation("save-all");
+
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            harness.worker.execute(() -> {
+                entered.countDown();
+                waitFor(release);
+            });
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            assertTrue(harness.service.queueCommandAudit(accepted));
+            harness.service.requestStop(JOINED.plusSeconds(3600));
+            assertFalse(harness.service.queueCommandAudit(invocation("time.set")));
+            release.countDown();
+        } finally {
+            release.countDown();
+        }
+        assertEquals(List.of(accepted), repository.audits);
+        assertEquals(List.of("recover", "audit", "close"), repository.events);
+    }
+
+    @Test
+    void failedCommandAuditWriteFailsTheServiceClosed() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        repository.failAudit = true;
+
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            assertTrue(harness.service.queueCommandAudit(invocation("weather.clear")));
+            harness.barrier();
+
+            assertFalse(harness.service.isRunning());
+            assertEquals(1, harness.failures.size());
+            assertFalse(harness.service.queueCommandAudit(invocation("time.set")));
+        }
     }
 
     @Test
@@ -939,6 +1012,8 @@ class PlayerServiceTest {
         private final List<String> events = new CopyOnWriteArrayList<>();
         private final List<SessionStart> joins = new CopyOnWriteArrayList<>();
         private final List<End> ends = new CopyOnWriteArrayList<>();
+        private final List<CommandAuditEvent> audits = new CopyOnWriteArrayList<>();
+        private volatile boolean failAudit;
         private volatile Function<UUID, Optional<PlayerProfile>> read = uuid -> Optional.empty();
         private volatile Function<UUID, AuthorizationSnapshot> authorization = AuthorizationSnapshot::initial;
         private volatile Function<List<UUID>, Map<UUID, AuthorizationSnapshot>> authorizationBatch;
@@ -977,6 +1052,17 @@ class PlayerServiceTest {
         public RoleChangeResult changeRole(RoleChangeRequest request) {
             assertOwner();
             return roleMutation.apply(request);
+        }
+
+        @Override
+        public void appendCommandAudit(CommandAuditEvent event) throws PersistenceException {
+            assertOwner();
+            if (failAudit) {
+                throw new PersistenceException(PersistenceException.Kind.DATABASE_FAILURE,
+                        "Player persistence command audit failed.");
+            }
+            audits.add(event);
+            events.add("audit");
         }
 
         @Override

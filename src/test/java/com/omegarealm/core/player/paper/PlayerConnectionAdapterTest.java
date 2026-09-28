@@ -436,6 +436,7 @@ class PlayerConnectionAdapterTest {
     }
 
     private static final class Repository implements PlayerSessionRepository {
+
         private final AtomicInteger reads = new AtomicInteger();
         private final List<SessionStart> joins = new CopyOnWriteArrayList<>();
         private final List<SessionEnd> ends = new CopyOnWriteArrayList<>();
@@ -444,6 +445,11 @@ class PlayerConnectionAdapterTest {
         private volatile boolean blockRead;
         private volatile boolean blockJoin;
         private volatile boolean blockRefresh;
+
+        @Override
+        public void appendCommandAudit(com.omegarealm.core.command.CommandAuditEvent event) {
+            throw new UnsupportedOperationException();
+        }
 
         @Override
         public LoadedPlayer loadPlayer(UUID uuid) {
