@@ -132,7 +132,8 @@ class PlayerServiceTest {
         FakeRepository repository = new FakeRepository();
         UUID uuid = UUID.randomUUID();
         PlayerProfile profile = new PlayerProfile(uuid, "Comet", JOINED, JOINED);
-        repository.targetResolution = target -> PlayerTargetResolution.found(profile);
+        repository.targetResolution = target -> PlayerTargetResolution.found(
+                new PublicPlayerProfile(profile, Role.PLAYER));
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         PlayerServiceLimits bounded = limits(1, 256, Duration.ofSeconds(3), Duration.ofSeconds(3),
@@ -149,7 +150,7 @@ class PlayerServiceTest {
             assertFalse(pending.toCompletableFuture().isDone());
             assertFailure(BUSY, harness.service.resolveTarget(new PlayerTarget.ByUuid(uuid)));
             release.countDown();
-            assertEquals(PlayerTargetResolution.found(profile), await(pending));
+            assertEquals(PlayerTargetResolution.found(new PublicPlayerProfile(profile, Role.PLAYER)), await(pending));
             assertTrue(harness.failures.isEmpty());
         } finally {
             release.countDown();
@@ -161,7 +162,7 @@ class PlayerServiceTest {
         FakeRepository repository = new FakeRepository();
         UUID uuid = UUID.randomUUID();
         repository.targetResolution = target -> PlayerTargetResolution.found(
-                new PlayerProfile(uuid, "Comet", JOINED, JOINED));
+                new PublicPlayerProfile(new PlayerProfile(uuid, "Comet", JOINED, JOINED), Role.PLAYER));
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
 
@@ -191,7 +192,8 @@ class PlayerServiceTest {
         repository.targetResolution = target -> {
             entered.countDown();
             waitFor(release);
-            return PlayerTargetResolution.found(new PlayerProfile(uuid, "Comet", JOINED, JOINED));
+            return PlayerTargetResolution.found(
+                    new PublicPlayerProfile(new PlayerProfile(uuid, "Comet", JOINED, JOINED), Role.PLAYER));
         };
 
         try (Harness harness = new Harness(repository, LIMITS)) {
@@ -217,7 +219,8 @@ class PlayerServiceTest {
         repository.targetResolution = target -> {
             entered.countDown();
             waitFor(release);
-            return PlayerTargetResolution.found(new PlayerProfile(uuid, "Comet", JOINED, JOINED));
+            return PlayerTargetResolution.found(
+                    new PublicPlayerProfile(new PlayerProfile(uuid, "Comet", JOINED, JOINED), Role.PLAYER));
         };
         PlayerServiceLimits shortLookup = limits(64, 256, Duration.ofSeconds(3), Duration.ofSeconds(3),
                 Duration.ofMillis(150), Duration.ofSeconds(30), Duration.ofSeconds(3));

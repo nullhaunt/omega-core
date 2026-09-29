@@ -5,10 +5,7 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.omegarealm.core.RuntimeState;
 import com.omegarealm.core.authorization.AuthorizationSnapshot;
 import com.omegarealm.core.authorization.Role;
-import com.omegarealm.core.player.PlayerProfile;
-import com.omegarealm.core.player.PlayerTarget;
-import com.omegarealm.core.player.PlayerTargetResolution;
-import com.omegarealm.core.player.PlayerTargetResolver;
+import com.omegarealm.core.player.*;
 import io.papermc.paper.command.brigadier.CommandSourceStack;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
@@ -33,21 +30,22 @@ class ProfileCommandTest {
         PlayerTarget self = new PlayerTarget.ByUuid(harness.viewerUuid);
         PlayerProfile ownProfile = new PlayerProfile(harness.viewerUuid, ".Unreference",
                 Instant.parse("2026-09-28T00:00:00Z"), Instant.parse("2026-09-28T01:00:00Z"));
+        PublicPlayerProfile publicProfile = new PublicPlayerProfile(ownProfile, Role.MODERATOR);
 
         assertEquals(1, harness.dispatcher.execute("profile", harness.playerSource()));
         assertEquals(List.of(self), harness.requests);
         assertEquals(List.of("Ω | Loading profile..."), harness.messages);
-        harness.complete(self, PlayerTargetResolution.found(ownProfile));
+        harness.complete(self, PlayerTargetResolution.found(publicProfile));
         assertTrue(harness.presented.isEmpty());
         harness.replies.remove().run();
-        assertEquals(List.of(ownProfile), harness.presented);
+        assertEquals(List.of(publicProfile), harness.presented);
 
         PlayerTarget bedrock = new PlayerTarget.ByUsername(".Unreference");
         assertEquals(1, harness.dispatcher.execute("profile .Unreference", harness.playerSource()));
         assertEquals(List.of(self, bedrock), harness.requests);
-        harness.complete(bedrock, PlayerTargetResolution.found(ownProfile));
+        harness.complete(bedrock, PlayerTargetResolution.found(publicProfile));
         harness.replies.remove().run();
-        assertEquals(List.of(ownProfile, ownProfile), harness.presented);
+        assertEquals(List.of(publicProfile, publicProfile), harness.presented);
     }
 
     @Test
@@ -130,7 +128,7 @@ class ProfileCommandTest {
         private final UUID viewerUuid = UUID.randomUUID();
         private final List<PlayerTarget> requests = new ArrayList<>();
         private final List<String> messages = new ArrayList<>();
-        private final List<PlayerProfile> presented = new ArrayList<>();
+        private final List<PublicPlayerProfile> presented = new ArrayList<>();
         private final Queue<Runnable> replies = new ArrayDeque<>();
         private final Map<PlayerTarget, CompletableFuture<PlayerTargetResolution>> lookups = new HashMap<>();
         private final List<Player> onlinePlayers = new ArrayList<>();

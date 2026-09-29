@@ -1,4 +1,11 @@
+import java.io.File
+import java.io.IOException
+import java.nio.charset.StandardCharsets
 import java.time.Instant
+import java.util.concurrent.TimeUnit
+import org.gradle.api.logging.Logging
+import org.gradle.api.services.BuildService
+import org.gradle.api.services.BuildServiceParameters
 
 plugins {
     id("java-library")
@@ -23,6 +30,103 @@ abstract class GenerateBuildIdentity : DefaultTask() {
         )
     }
 }
+
+abstract class GeyserProcessService : BuildService<BuildServiceParameters.None>, AutoCloseable {
+    private val logger = Logging.getLogger(GeyserProcessService::class.java)
+    private var process: Process? = null
+
+    @Volatile
+    private var stopping = false
+
+    @Synchronized
+    fun start(javaExecutable: File, directory: File) {
+        check(process == null) { "This runServer invocation already owns a Geyser process." }
+
+        val log = directory.resolve("gradle-geyser.log")
+        val started = try {
+            ProcessBuilder(
+                javaExecutable.absolutePath,
+                "-Xmx1G",
+                "-jar",
+                "Geyser-Standalone.jar",
+                "--nogui"
+            )
+                .directory(directory)
+                .redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.to(log))
+                .start()
+        } catch (exception: IOException) {
+            throw GradleException("Could not start Geyser Standalone. Check the Java installation and run/geyser-standalone directory.", exception)
+        }
+
+        process = started
+        val exitedDuringStartup = try {
+            started.waitFor(3, TimeUnit.SECONDS)
+        } catch (exception: InterruptedException) {
+            process = null
+            started.destroyForcibly()
+            Thread.currentThread().interrupt()
+            throw GradleException("Interrupted while starting Geyser Standalone.", exception)
+        }
+
+        if (exitedDuringStartup) {
+            process = null
+            throw GradleException("Geyser Standalone exited during startup. Check $log.")
+        }
+
+        started.onExit().thenAccept {
+            if (!stopping) {
+                logger.error("Geyser Standalone exited while runServer was active. Check {}.", log)
+            }
+        }
+
+        logger.lifecycle("Started Geyser Standalone; output is in {}.", log)
+    }
+
+    @Synchronized
+    fun stop() {
+        val running = process ?: return
+        process = null
+        stopping = true
+
+        if (!running.isAlive) {
+            return
+        }
+
+        try {
+            running.outputStream.bufferedWriter(StandardCharsets.UTF_8).use { input ->
+                input.write("geyser stop")
+                input.newLine()
+            }
+        } catch (_: IOException) {
+            // Geyser may have exited before its console accepted the stop command.
+        }
+
+        try {
+            if (!running.waitFor(5, TimeUnit.SECONDS)) {
+                running.destroy()
+                if (!running.waitFor(2, TimeUnit.SECONDS)) {
+                    running.destroyForcibly().waitFor(2, TimeUnit.SECONDS)
+                }
+            }
+        } catch (_: InterruptedException) {
+            running.destroyForcibly()
+            Thread.currentThread().interrupt()
+        }
+
+        if (running.isAlive) {
+            logger.error("Geyser Standalone did not exit after its stop deadline; check the process before restarting.")
+        } else {
+            logger.lifecycle("Stopped Geyser Standalone.")
+        }
+    }
+
+    override fun close() {
+        stop()
+    }
+}
+
+val geyserProcess = gradle.sharedServices.registerIfAbsent("omegaGeyser", GeyserProcessService::class) {}
 
 val gitCommit = providers.exec {
     commandLine("git", "rev-parse", "--short=12", "--verify", "HEAD")
@@ -79,6 +183,10 @@ java {
     toolchain.languageVersion = JavaLanguageVersion.of(25)
 }
 
+val java25Launcher = javaToolchains.launcherFor {
+    languageVersion.set(JavaLanguageVersion.of(25))
+}
+
 tasks {
     check {
         dependsOn(integrationTestTask)
@@ -108,11 +216,46 @@ tasks {
     }
 
     runServer {
-        // Configure the Minecraft version for our task.
-        // This is the only required configuration besides applying the plugin.
-        // Your plugin's jar (or shadowJar if present) will be used automatically.
+        val service = geyserProcess
+
         minecraftVersion("26.3")
         jvmArgs("-Xms8G", "-Xmx8G", "-Dcom.mojang.eula.agree=true")
+        javaLauncher.set(java25Launcher)
+        // Gradle closes the service if Paper fails before the final task action.
+        usesService(geyserProcess)
+
+        doFirst {
+            val serverTask = this as xyz.jpenilla.runpaper.task.RunServer
+            val serverDirectory = serverTask.runDirectory.get().asFile
+            val pluginsDirectory = serverDirectory.resolve("plugins")
+
+            for (prefix in listOf("floodgate-spigot-", "ViaVersion-", "ViaBackwards-")) {
+                val matches = pluginsDirectory.listFiles { file ->
+                    file.isFile && file.name.startsWith(prefix) && file.extension == "jar"
+                }.orEmpty()
+
+                if (matches.size != 1) {
+                    throw GradleException("Expected one ${prefix}*.jar in $pluginsDirectory; found ${matches.size}.")
+                }
+            }
+
+            val geyserDirectory = serverDirectory.resolve("geyser-standalone")
+            for (name in listOf("Geyser-Standalone.jar", "config.yml", "key.pem")) {
+                if (!geyserDirectory.resolve(name).isFile) {
+                    throw GradleException("Missing $name in $geyserDirectory. Install and configure Geyser Standalone before running Paper.")
+                }
+            }
+
+            if (!pluginsDirectory.resolve("floodgate/key.pem").isFile) {
+                throw GradleException("Missing Floodgate key in $pluginsDirectory/floodgate. Restore the matching key before running Paper.")
+            }
+
+            service.get().start(serverTask.javaLauncher.get().executablePath.asFile, geyserDirectory)
+        }
+
+        doLast {
+            service.get().stop()
+        }
     }
 
     processResources {

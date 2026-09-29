@@ -5,7 +5,7 @@ import java.util.Objects;
 /**
  * A bounded lookup never guesses between UUIDs sharing the same stored username.
  */
-public record PlayerTargetResolution(Status status, PlayerProfile profile) {
+public record PlayerTargetResolution(Status status, PublicPlayerProfile profile) {
 
     public PlayerTargetResolution {
         Objects.requireNonNull(status, "status");
@@ -14,7 +14,7 @@ public record PlayerTargetResolution(Status status, PlayerProfile profile) {
         }
     }
 
-    public static PlayerTargetResolution found(PlayerProfile profile) {
+    public static PlayerTargetResolution found(PublicPlayerProfile profile) {
         return new PlayerTargetResolution(Status.FOUND, Objects.requireNonNull(profile, "profile"));
     }
 

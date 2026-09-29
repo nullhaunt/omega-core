@@ -110,14 +110,19 @@ summarized in ADMIN/OWNER help output.
 
 Connected players can use `/profile` for their own read-only profile or
 `/profile <current-username|UUID>` for a persisted player. The dialog currently shows the
-stored username and first successful join date in UTC; it does not invent Realm, Frontier,
-Slayer or achievement data. Lookup uses the existing bounded player worker and never blocks
-the command thread. A missing or ambiguous name opens no dialog. Current names include the
+stored username, first successful join date in UTC, and the current stored staff role for
+Moderator, Admin, or Owner. Players with the ordinary Player role have no staff label.
+The role and identity come from one lookup; a missing authorization record fails closed.
+The dialog does not invent Realm, Frontier, Slayer or achievement data. Lookup uses the
+existing bounded player worker and never blocks the command thread. A missing or ambiguous
+name opens no dialog. Current names include the
 default Floodgate prefix, such as `.Unreference`; Java and Bedrock identities remain separate
 unless an explicit account-linking feature is added. The same Paper dialog is sent to Java
 and translated by Geyser for Bedrock. `omegacore:profile` is the namespaced path; local
 console and delegated senders cannot open a profile dialog. Online names appear as target
 suggestions; offline current names and UUIDs remain valid when entered directly.
+Player heads are a later crossplay gate: Geyser's current dialog translation omits item
+bodies, so this build does not show a Java-only portrait.
 
 Omega handles public player chat through a server-owned delivery path. It cancels Paper's
 normal signed broadcast and sends a fresh Adventure component to the viewers retained by
@@ -335,5 +340,14 @@ For a manual lifecycle check, deploy the built plugin to a disposable Paper 26.3
    distinct session IDs and the exact close reasons. A critical read failure must close
    admission and stop the server. Never apply these fixtures to a live database.
 
-The repository's `runServer` task retains its existing development JVM settings. Review
-those settings before using it on a machine with limited available memory.
+The development `runServer` task starts Paper and the existing standalone Geyser bridge
+together. Keep exactly one Floodgate, ViaVersion and ViaBackwards JAR in `run/plugins/`.
+Keep `Geyser-Standalone.jar`, its configured `config.yml` and Floodgate `key.pem` in
+`run/geyser-standalone/`; the matching Floodgate key must also be present in
+`run/plugins/floodgate/`. These files are local operator data and are not downloaded or
+replaced by Gradle. Start `runServer` from the shell that supplies Omega's database
+password environment variable. Paper keeps its 8 GB JVM settings; Geyser has a 1 GB
+maximum heap and writes output to `run/geyser-standalone/gradle-geyser.log`.
+When Paper exits, the task sends Geyser its stop command and then ends any bridge
+process it started that does not stop promptly. Stop a separately launched Geyser
+instance before using `runServer` so the Bedrock port is free.

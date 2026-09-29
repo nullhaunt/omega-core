@@ -1,6 +1,6 @@
 package com.omegarealm.core.player.paper;
 
-import com.omegarealm.core.player.PlayerProfile;
+import com.omegarealm.core.player.PublicPlayerProfile;
 import io.papermc.paper.dialog.Dialog;
 import io.papermc.paper.registry.data.dialog.DialogBase;
 import io.papermc.paper.registry.data.dialog.body.DialogBody;
@@ -10,6 +10,7 @@ import org.bukkit.entity.Player;
 
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
@@ -24,11 +25,16 @@ public final class ProfileDialog {
     private ProfileDialog() {
     }
 
-    public static void show(Player viewer, PlayerProfile profile) {
+    public static void show(Player viewer, PublicPlayerProfile profile) {
+        List<DialogBody> body = new ArrayList<>();
+        body.add(DialogBody.plainMessage(Component.text(
+                "Member since " + JOIN_DATE.format(profile.identity().firstSeenAt()) + " (UTC)")));
+        profile.staffDesignation().ifPresent(designation -> body.add(
+                DialogBody.plainMessage(Component.text("Staff: " + designation))));
+
         Dialog dialog = Dialog.create(builder -> builder.empty()
-                .base(DialogBase.builder(Component.text(profile.username()))
-                        .body(List.of(DialogBody.plainMessage(Component.text(
-                                "Member since " + JOIN_DATE.format(profile.firstSeenAt()) + " (UTC)"))))
+                .base(DialogBase.builder(Component.text(profile.identity().username()))
+                        .body(body)
                         .build())
                 .type(DialogType.notice()));
         viewer.showDialog(dialog);

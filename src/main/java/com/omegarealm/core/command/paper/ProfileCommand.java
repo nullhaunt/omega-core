@@ -5,10 +5,10 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.tree.LiteralCommandNode;
 import com.omegarealm.core.authorization.AuthorizationActor;
-import com.omegarealm.core.player.PlayerProfile;
 import com.omegarealm.core.player.PlayerTarget;
 import com.omegarealm.core.player.PlayerTargetResolution;
 import com.omegarealm.core.player.PlayerTargetResolver;
+import com.omegarealm.core.player.PublicPlayerProfile;
 import io.papermc.paper.command.brigadier.CommandSourceStack;
 import io.papermc.paper.command.brigadier.Commands;
 import org.bukkit.entity.Player;
@@ -27,14 +27,14 @@ final class ProfileCommand {
     private final CommandAccess access;
     private final Supplier<PlayerTargetResolver> targets;
     private final BiConsumer<Player, Runnable> playerReply;
-    private final BiConsumer<Player, PlayerProfile> presenter;
+    private final BiConsumer<Player, PublicPlayerProfile> presenter;
     private final Logger logger;
     private final Runnable schedulingFailure;
     private final OnlinePlayerTargetSuggestions targetSuggestions;
 
     ProfileCommand(CommandAccess access, Supplier<PlayerTargetResolver> targets,
                    BiConsumer<Player, Runnable> playerReply,
-                   BiConsumer<Player, PlayerProfile> presenter,
+                   BiConsumer<Player, PublicPlayerProfile> presenter,
                    Logger logger, Runnable schedulingFailure,
                    OnlinePlayerTargetSuggestions targetSuggestions) {
         this.access = Objects.requireNonNull(access, "access");

@@ -145,6 +145,17 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
                 instant(result, "first_seen_at"), instant(result, "last_seen_at"));
     }
 
+    private static PublicPlayerProfile publicProfile(ResultSet result) throws SQLException {
+        return new PublicPlayerProfile(profile(result), storedRole(result.getString("role")));
+    }
+
+    private static Role storedRole(String role) {
+        if (role == null) {
+            throw new IllegalStateException("Existing player authorization is missing.");
+        }
+        return Role.valueOf(role);
+    }
+
     @Override
     public LoadedPlayer loadPlayer(UUID playerUuid) throws PersistenceException {
         Objects.requireNonNull(playerUuid, "playerUuid");
@@ -333,7 +344,7 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
         Objects.requireNonNull(target, "target");
         requireRecovered();
         return transaction("player target lookup", () -> switch (target) {
-            case PlayerTarget.ByUuid uuid -> selectPlayer(uuid.uuid())
+            case PlayerTarget.ByUuid uuid -> selectPublicPlayer(uuid.uuid())
                     .map(PlayerTargetResolution::found).orElseGet(PlayerTargetResolution::missing);
             case PlayerTarget.ByUsername name -> selectByUsername(name.username());
         });
@@ -488,12 +499,25 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
         }
     }
 
+    private Optional<PublicPlayerProfile> selectPublicPlayer(UUID playerUuid) throws SQLException {
+        try (PreparedStatement statement = prepare(connection, """
+                SELECT p.uuid, p.username, p.first_seen_at, p.last_seen_at, a.role
+                FROM players p LEFT JOIN player_authorizations a ON a.player_uuid = p.uuid
+                WHERE p.uuid = ?
+                """)) {
+            statement.setObject(1, playerUuid);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? Optional.of(publicProfile(result)) : Optional.empty();
+            }
+        }
+    }
+
     private PlayerTargetResolution selectByUsername(String username) throws SQLException {
         try (PreparedStatement statement = prepare(connection, """
-                SELECT uuid, username, first_seen_at, last_seen_at
-                FROM players
-                WHERE lower(username) = lower(?)
-                ORDER BY uuid
+                SELECT p.uuid, p.username, p.first_seen_at, p.last_seen_at, a.role
+                FROM players p LEFT JOIN player_authorizations a ON a.player_uuid = p.uuid
+                WHERE lower(p.username) = lower(?)
+                ORDER BY p.uuid
                 LIMIT 2
                 """)) {
             statement.setString(1, username);
@@ -502,8 +526,9 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
                     return PlayerTargetResolution.missing();
                 }
                 PlayerProfile first = profile(rows);
+                String role = rows.getString("role");
                 return rows.next() ? PlayerTargetResolution.ambiguous()
-                        : PlayerTargetResolution.found(first);
+                        : PlayerTargetResolution.found(new PublicPlayerProfile(first, storedRole(role)));
             }
         }
     }

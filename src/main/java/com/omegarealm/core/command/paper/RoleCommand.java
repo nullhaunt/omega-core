@@ -197,7 +197,7 @@ public final class RoleCommand {
             return;
         }
 
-        PlayerProfile profile = resolution.profile();
+        PlayerProfile profile = resolution.profile().identity();
         if (actor instanceof AuthorizationActor.Player player && player.uuid().equals(profile.uuid())) {
             record(actor, Outcome.DENIED, operationId, null);
             replyNotice(sender, CommandMessages.Kind.ERROR, "Role not changed",

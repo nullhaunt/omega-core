@@ -495,7 +495,7 @@ class RoleCommandTest {
                     && targetProfile.uuid().equals(uuid1)
                     || target instanceof PlayerTarget.ByUsername(String username)
                     && targetProfile.username().equalsIgnoreCase(username))) {
-                return PlayerTargetResolution.found(targetProfile);
+                return PlayerTargetResolution.found(new PublicPlayerProfile(targetProfile, Role.PLAYER));
             }
             return PlayerTargetResolution.missing();
         }

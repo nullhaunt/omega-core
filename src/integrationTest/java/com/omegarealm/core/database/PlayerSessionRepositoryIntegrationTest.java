@@ -225,8 +225,9 @@ class PlayerSessionRepositoryIntegrationTest {
             beta.join(renamed);
             PlayerTargetResolution current = alpha.resolveTarget(PlayerTarget.parse("cOmEt"));
             assertEquals(PlayerTargetResolution.Status.FOUND, current.status());
-            assertEquals(first.playerUuid(), current.profile().uuid());
-            assertEquals("Comet", current.profile().username());
+            assertEquals(first.playerUuid(), current.profile().identity().uuid());
+            assertEquals("Comet", current.profile().identity().username());
+            assertEquals(Role.PLAYER, current.profile().role());
             assertEquals(PlayerTargetResolution.Status.NOT_FOUND,
                     alpha.resolveTarget(PlayerTarget.parse("Orbit")).status());
             assertEquals(PlayerTargetResolution.Status.NOT_FOUND,
@@ -239,7 +240,8 @@ class PlayerSessionRepositoryIntegrationTest {
 
             PlayerTargetResolution byUuid = beta.resolveTarget(new PlayerTarget.ByUuid(first.playerUuid()));
             assertEquals(PlayerTargetResolution.Status.FOUND, byUuid.status());
-            assertEquals("Comet", byUuid.profile().username());
+            assertEquals("Comet", byUuid.profile().identity().username());
+            assertEquals(Role.PLAYER, byUuid.profile().role());
             assertEquals(PlayerTargetResolution.Status.NOT_FOUND,
                     beta.resolveTarget(new PlayerTarget.ByUuid(UUID.randomUUID())).status());
             assertEquals(0, scalar(admin, "SELECT count(*) FROM command_audit"));
@@ -248,6 +250,60 @@ class PlayerSessionRepositoryIntegrationTest {
                     SELECT count(*) FROM pg_indexes
                     WHERE tablename = 'players' AND indexname = 'players_current_username_lookup_idx'
                     """));
+        }
+    }
+
+    @Test
+    void publicProfileShowsCommittedRolesForOfflineTargets() throws Exception {
+        try (Database database = database();
+             var alpha = ready(database, "alpha"); var beta = ready(database, "beta")) {
+            SessionStart target = start("Comet", JOINED);
+            alpha.join(target);
+            alpha.endSession(target.sessionId(), JOINED.plusSeconds(1), SessionEnd.QUIT);
+
+            for (Role role : Role.values()) {
+                if (role != Role.PLAYER) {
+                    assertEquals(RoleChangeResult.Status.CHANGED,
+                            alpha.changeRole(consoleChange(target.playerUuid(), role)).status());
+                }
+
+                PlayerTargetResolution byName = beta.resolveTarget(PlayerTarget.parse("cOmEt"));
+                PlayerTargetResolution byUuid = beta.resolveTarget(new PlayerTarget.ByUuid(target.playerUuid()));
+                assertEquals(role, byName.profile().role());
+                assertEquals(role, byUuid.profile().role());
+                assertEquals(target.playerUuid(), byName.profile().identity().uuid());
+            }
+
+            assertEquals(RoleChangeResult.Status.CHANGED,
+                    alpha.changeRole(consoleChange(target.playerUuid(), Role.PLAYER)).status());
+            assertEquals(Role.PLAYER, beta.resolveTarget(PlayerTarget.parse("Comet")).profile().role());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "invalid-role"})
+    void publicProfileRejectsUnavailableStaffAuthority(String corruption) throws Exception {
+        DatabaseConfig config = isolatedConfig(3);
+        try (Database database = bootstrap(config, "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha")) {
+            SessionStart target = start("Comet", JOINED);
+            repository.join(target);
+
+            try (Connection admin = admin(config); Statement statement = admin.createStatement()) {
+                if (corruption.equals("missing")) {
+                    statement.executeUpdate("DELETE FROM player_authorizations");
+                } else {
+                    statement.execute("ALTER TABLE player_authorizations DROP CONSTRAINT player_authorization_role");
+                    statement.executeUpdate("UPDATE player_authorizations SET role = 'DO_NOT_LOG'");
+                }
+            }
+
+            PersistenceException failure = assertThrows(PersistenceException.class,
+                    () -> repository.resolveTarget(new PlayerTarget.ByUuid(target.playerUuid())));
+            assertEquals(DATABASE_FAILURE, failure.kind());
+            assertFalse(failure.getMessage().contains("DO_NOT_LOG"));
+            assertNull(failure.getCause());
+            assertEquals(OWNERSHIP_LOST, assertThrows(PersistenceException.class, repository::checkOwnership).kind());
         }
     }
 
