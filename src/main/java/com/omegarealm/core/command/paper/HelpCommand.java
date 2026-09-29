@@ -70,16 +70,8 @@ final class HelpCommand {
             reader.setCursor(context.getNodes().getLast().getRange().getStart());
             throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument().createWithContext(reader);
         }
-        List<CommandMessages.Field> fields = new ArrayList<>();
-        fields.add(CommandMessages.Field.normal("Command", CommandCatalog.usage(definition, actor)));
-        if (definition == CommandCatalog.ROLE) {
-            fields.add(CommandMessages.Field.normal("Roles you can assign",
-                    CommandCatalog.assignableRoleNames(actor)));
-        } else if (definition == CommandCatalog.PROFILE) {
-            fields.add(CommandMessages.Field.normal("Finding players",
-                    "Online names are suggested. Use a current name or player ID for offline players."));
-        }
-        CommandMessages.sendPanel(context.getSource().getSender(), definition.description(), fields);
+        CommandMessages.sendPanel(context.getSource().getSender(), definition.description(), List.of(
+                CommandMessages.Field.normal("Command", definition.usage(actor))));
         return 1;
     }
 }

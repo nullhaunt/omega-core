@@ -1,16 +1,20 @@
 package com.omegarealm.core.command.paper;
 
+import com.mojang.brigadier.tree.LiteralCommandNode;
 import com.omegarealm.core.diagnostics.BuildIdentity;
 import com.omegarealm.core.diagnostics.RuntimeDiagnostics;
 import com.omegarealm.core.player.PlayerService;
+import com.omegarealm.core.player.paper.BedrockSkinAdapter;
 import com.omegarealm.core.player.paper.ProfileDialog;
 import com.omegarealm.core.scheduler.OmegaScheduler;
+import io.papermc.paper.command.brigadier.CommandSourceStack;
 import io.papermc.paper.command.brigadier.Commands;
 import io.papermc.paper.command.brigadier.argument.ArgumentTypes;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.BiConsumer;
@@ -26,12 +30,14 @@ public final class OmegaCommands {
     private final ProfileCommand profiles;
     private final HelpCommand help;
     private final DiagnosticsCommand diagnostics;
+    private final SkinCommand skins;
     private volatile Set<String> registered = Set.of();
 
     public OmegaCommands(CommandAccess access, Supplier<PlayerService> players,
                          BuildIdentity build, Supplier<RuntimeDiagnostics> runtime,
                          OmegaScheduler scheduler, CommandAudit audit, Logger logger,
-                         Runnable schedulingFailure, BiConsumer<Player, Runnable> playerReply) {
+                         Runnable schedulingFailure, BiConsumer<Player, Runnable> playerReply,
+                         Supplier<BedrockSkinAdapter> bedrockSkins) {
         Objects.requireNonNull(access, "access");
         OnlinePlayerTargetSuggestions targetSuggestions =
                 new OnlinePlayerTargetSuggestions(access, Bukkit::getOnlinePlayers);
@@ -41,35 +47,43 @@ public final class OmegaCommands {
                 ProfileDialog::show, logger, schedulingFailure, targetSuggestions);
         help = new HelpCommand(access);
         diagnostics = new DiagnosticsCommand(access, build, runtime, audit);
+        skins = new SkinCommand(access, bedrockSkins, scheduler, audit, logger,
+                schedulingFailure, playerReply, targetSuggestions);
     }
 
     public void register(Commands registrar) {
+        registered = Set.of();
+
         // The native type supplies player completion to clients. Omega still resolves the
         // typed name or UUID from its own persisted player records during execution.
         var targetType = ArgumentTypes.playerProfiles();
 
-        Set<String> roleLabels = registrar.register(roles.node(targetType),
-                CommandCatalog.ROLE.description(), CommandCatalog.ROLE.aliases());
-        Set<String> profileLabels = registrar.register(profiles.node(targetType),
-                CommandCatalog.PROFILE.description(), CommandCatalog.PROFILE.aliases());
-        Set<String> helpLabels = registrar.register(help.node(), CommandCatalog.HELP.description(),
-                CommandCatalog.HELP.aliases());
-        Set<String> buildLabels = registrar.register(diagnostics.buildNode(), CommandCatalog.BUILD.description(),
-                CommandCatalog.BUILD.aliases());
-        Set<String> statusLabels = registrar.register(diagnostics.statusNode(), CommandCatalog.STATUS.description(),
-                CommandCatalog.STATUS.aliases());
-        if (!roleLabels.containsAll(CommandCatalog.ROLE.labels())
-                || !profileLabels.containsAll(CommandCatalog.PROFILE.labels())
-                || !helpLabels.containsAll(CommandCatalog.HELP.labels())
-                || !buildLabels.containsAll(CommandCatalog.BUILD.labels())
-                || !statusLabels.containsAll(CommandCatalog.STATUS.labels())) {
-            throw new IllegalStateException("Omega command registration did not claim its expected labels.");
+        List<Registration> commands = List.of(
+                new Registration(CommandCatalog.HELP, help.node()),
+                new Registration(CommandCatalog.PROFILE, profiles.node(targetType)),
+                new Registration(CommandCatalog.BUILD, diagnostics.buildNode()),
+                new Registration(CommandCatalog.STATUS, diagnostics.statusNode()),
+                new Registration(CommandCatalog.ROLE, roles.node(targetType)),
+                new Registration(CommandCatalog.SKIN, skins.node(targetType)));
+        List<CommandCatalog.Definition> registeredDefinitions = commands.stream()
+                .map(Registration::definition)
+                .toList();
+        Set<CommandCatalog.Definition> definitions = new HashSet<>(registeredDefinitions);
+        if (definitions.size() != commands.size()
+                || !definitions.equals(Set.copyOf(CommandCatalog.definitions()))) {
+            throw new IllegalStateException("Omega command registration does not match its catalog.");
         }
-        var labels = new HashSet<>(roleLabels);
-        labels.addAll(profileLabels);
-        labels.addAll(helpLabels);
-        labels.addAll(buildLabels);
-        labels.addAll(statusLabels);
+
+        var labels = new HashSet<String>();
+        for (Registration command : commands) {
+            CommandCatalog.Definition definition = command.definition();
+            Set<String> claimed = registrar.register(command.node(),
+                    definition.description(), definition.aliases());
+            if (!claimed.containsAll(definition.labels())) {
+                throw new IllegalStateException("Omega command registration did not claim its expected labels.");
+            }
+            labels.addAll(claimed);
+        }
         registered = Set.copyOf(labels);
     }
 
@@ -84,5 +98,17 @@ public final class OmegaCommands {
 
     public boolean owns(String label) {
         return registered.contains(label) && CommandCatalog.find(label) != null;
+    }
+
+    private record Registration(CommandCatalog.Definition definition,
+                                LiteralCommandNode<CommandSourceStack> node) {
+
+        private Registration {
+            Objects.requireNonNull(definition, "definition");
+            Objects.requireNonNull(node, "node");
+            if (!definition.name().equals(node.getLiteral())) {
+                throw new IllegalArgumentException("A command node must match its catalog name.");
+            }
+        }
     }
 }

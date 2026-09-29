@@ -106,10 +106,11 @@ durable audit history; operational logs retain the operation and outcome. Routin
 feedback omits those internal identifiers. ADMIN can assign PLAYER/MODERATOR;
 OWNER can also assign ADMIN. Only local console can change OWNER. RCON, command blocks,
 delegated execution, self-changes and peer/superior targets cannot grant Omega authority.
-`/help` lists commands visible to the sender; `/help role` explains the role command only to
-authorized staff. The registered namespaced paths `omegacore:role` and `omegacore:help` share
-those checks. The old `/omega role set` form has been retired. Native management roots are
-summarized in ADMIN/OWNER help output.
+`/help` lists commands visible to the sender; `/help <command>` shows that command's
+description and syntax when the sender has access. Help does not repeat the online-player
+or assignable-role suggestions exposed by tab completion. The registered namespaced paths
+`omegacore:role` and `omegacore:help` share those checks. The old `/omega role set` form has
+been retired. Native management roots are summarized in ADMIN/OWNER help output.
 
 Connected players can use `/profile` for their own read-only profile or
 `/profile <current-username|UUID>` for a persisted player. The dialog currently shows the
@@ -161,6 +162,24 @@ with readable times and labels. Player replies color important states; console o
 Both commands log an operational `MANAGEMENT` invocation. They remain readable when the
 durable command-audit queue is unavailable because they do not change server state.
 Their namespaced paths are `omegacore:build` and `omegacore:status`.
+
+When Floodgate is installed, Omega recovers Java-visible Bedrock skins left on Floodgate's
+signed Steve placeholder. Each Bedrock join makes one asynchronous request for the account's
+most recently converted, signed texture from Geyser's Global API. Omega changes the Paper
+profile only if the same player is still connected and Floodgate has not already supplied a
+different skin. There are at most 32 concurrent lookups, with an eight-second HTTP deadline
+and a 32 KiB response limit. Quit and shutdown cancel pending lookups; HTTP failure leaves
+the existing skin in place. Floodgate is optional for Java-only servers, and no skin plugin
+or configuration key is added. A recently changed Bedrock skin may remain on its previous
+conversion until Geyser's Global API has processed the new skin.
+
+Fresh ADMIN/OWNER players and the actual local console can run `skin refresh <player>` for
+one connected Floodgate player, using their current name or UUID. The command repeats the
+bounded lookup and re-registers that player's profile for Java viewers, even if its signed
+texture is unchanged. It cannot fetch an offline player's live Bedrock skin. `omegacore:skin`
+has the same access policy. Accepted invocations enter the durable `MANAGEMENT` command audit
+queue before the refresh starts; the completion outcome goes to a still-connected requester
+and the operational log. An `INVOKED` row records acceptance, not proof that the skin changed.
 
 Authorized staff receive usage guidance for incomplete commands and specific target, role and
 reason validation messages. Missing or ambiguous names have distinct replies. Self-changes

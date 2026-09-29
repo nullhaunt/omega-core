@@ -38,9 +38,7 @@ class HelpCommandTest {
             assertThrows(CommandSyntaxException.class, () -> harness.dispatcher.execute("help build", source));
             harness.messages.clear();
             assertEquals(1, harness.dispatcher.execute("help profile", source));
-            assertEquals(List.of("Ω | View a player's profile\n  Command: /profile [player]"
-                            + "\n  Finding players: Online names are suggested."
-                            + " Use a current name or player ID for offline players."),
+            assertEquals(List.of("Ω | View a player's profile\n  Command: /profile [player]"),
                     harness.messages);
             var suggestions = harness.dispatcher.getCompletionSuggestions(harness.dispatcher.parse("help r", source)).get();
             assertTrue(suggestions.isEmpty());
@@ -49,14 +47,12 @@ class HelpCommandTest {
             harness.authorities.put(player, new AuthorizationSnapshot(UUID.randomUUID(), Role.ADMIN, 2));
             assertEquals(1, harness.dispatcher.execute("help role", source));
             assertEquals(List.of("Ω | Change a player's role\n"
-                            + "  Command: /role set <player> <role> <reason>\n"
-                            + "  Roles you can assign: Player or Moderator"),
+                            + "  Command: /role set <player> <role> <reason>"),
                     harness.messages);
             harness.messages.clear();
             assertEquals(1, harness.dispatcher.execute("help omegacore:role", source));
             assertEquals(List.of("Ω | Change a player's role\n"
-                            + "  Command: /role set <player> <role> <reason>\n"
-                            + "  Roles you can assign: Player or Moderator"),
+                            + "  Command: /role set <player> <role> <reason>"),
                     harness.messages);
             harness.messages.clear();
             assertEquals(1, harness.dispatcher.execute("help", source));

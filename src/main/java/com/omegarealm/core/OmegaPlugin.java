@@ -12,17 +12,23 @@ import com.omegarealm.core.config.OmegaConfig;
 import com.omegarealm.core.database.PostgresBootstrap;
 import com.omegarealm.core.diagnostics.BuildIdentity;
 import com.omegarealm.core.lifecycle.AdmissionGuard;
+import com.omegarealm.core.player.paper.BedrockSkinAdapter;
 import com.omegarealm.core.player.paper.PlayerConnectionAdapter;
 import com.omegarealm.core.scheduler.OmegaScheduler;
 import com.omegarealm.core.scheduler.paper.PaperOmegaScheduler;
 import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.server.ServerLoadEvent;
+import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.time.Clock;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public final class OmegaPlugin extends JavaPlugin {
+public final class OmegaPlugin extends JavaPlugin implements Listener {
 
     private final AtomicBoolean shutdownRequested = new AtomicBoolean();
     private volatile OmegaRuntime runtime;
@@ -30,10 +36,12 @@ public final class OmegaPlugin extends JavaPlugin {
     private OmegaScheduler scheduler;
     private PlayerPermissionAdapter playerPermissions;
     private NativeCommandFence nativeCommands;
+    private BedrockSkinAdapter bedrockSkins;
 
     @Override
     public void onEnable() {
         getServer().getPluginManager().registerEvents(new AdmissionGuard(this::state), this);
+        getServer().getPluginManager().registerEvents(this, this);
 
         try {
             OmegaConfig config = new ConfigLoader().load(getDataFolder().toPath());
@@ -55,7 +63,8 @@ public final class OmegaPlugin extends JavaPlugin {
             BuildIdentity build = BuildIdentity.load(getClass().getClassLoader());
             OmegaCommands commands = new OmegaCommands(commandAccess, runtime::players,
                     build, runtime::diagnostics,
-                    scheduler, commandAudit, getLogger(), this::schedulingFailed, playerConnections::reply);
+                    scheduler, commandAudit, getLogger(), this::schedulingFailed,
+                    playerConnections::reply, () -> bedrockSkins);
             nativeCommands = new NativeCommandFence(this, playerPermissions, commandAccess,
                     commandAudit, commands, runtime::failPlayerHandling,
                     () -> state() == RuntimeState.READY, runtime::start);
@@ -85,12 +94,44 @@ public final class OmegaPlugin extends JavaPlugin {
         }
     }
 
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onServerLoad(ServerLoadEvent event) {
+        if (event.getType() != ServerLoadEvent.LoadType.STARTUP || shutdownRequested.get()) {
+            return;
+        }
+
+        Plugin floodgate = getServer().getPluginManager().getPlugin("floodgate");
+        if (floodgate == null) {
+            return;
+        }
+        if (!floodgate.isEnabled()) {
+            getLogger().warning("Floodgate is installed but unavailable; Bedrock skin recovery is disabled.");
+            return;
+        }
+
+        BedrockSkinAdapter started = null;
+        try {
+            started = new BedrockSkinAdapter(this, this::state, getLogger());
+            getServer().getPluginManager().registerEvents(started, this);
+            bedrockSkins = started;
+            getLogger().info("Bedrock skin recovery is ready.");
+        } catch (RuntimeException | LinkageError unavailable) {
+            if (started != null) {
+                started.close();
+            }
+            getLogger().warning("Bedrock skin recovery could not start; player admission remains available.");
+        }
+    }
+
     @Override
     public void onDisable() {
         if (!getServer().isStopping()) {
             stopServer();
         }
 
+        if (bedrockSkins != null) {
+            bedrockSkins.close();
+        }
         if (scheduler != null) {
             scheduler.close();
         }

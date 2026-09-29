@@ -141,10 +141,19 @@ val generateBuildIdentity = tasks.register<GenerateBuildIdentity>("generateBuild
 
 repositories {
     mavenCentral()
+    maven {
+        url = uri("https://repo.opencollab.dev/main/")
+        content {
+            includeGroup("org.geysermc.floodgate")
+        }
+    }
 }
 
 dependencies {
     paperweight.paperDevBundle("26.3.build.+")
+    compileOnly("org.geysermc.floodgate:api:2.2.5-SNAPSHOT") {
+        isTransitive = false
+    }
 
     implementation("com.zaxxer:HikariCP:7.1.0")
     implementation("org.postgresql:postgresql:42.7.13")

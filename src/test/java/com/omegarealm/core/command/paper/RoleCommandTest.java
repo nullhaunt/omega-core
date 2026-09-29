@@ -81,8 +81,7 @@ class RoleCommandTest {
                     "role set " + harness.target, "role set " + harness.target + " ADMIN")) {
                 harness.messages.clear();
                 assertEquals(0, harness.dispatcher.execute(command, source));
-                assertEquals(List.of("Ω | Set a player's role\n  Command: role set <player> <role> <reason>"
-                                + "\n  Roles you can assign: Player, Moderator, Admin, or Owner"),
+                assertEquals(List.of("Ω | Change a player's role\n  Command: role set <player> <role> <reason>"),
                         harness.messages);
             }
             assertEquals(0, harness.repository.calls);
@@ -97,7 +96,7 @@ class RoleCommandTest {
             assertEquals(List.of("Ω | Enter a current username or full player ID (UUID)."), harness.messages);
             harness.messages.clear();
             assertEquals(0, harness.dispatcher.execute("role set " + harness.target + " UNKNOWN Staff appointment", source));
-            assertEquals(List.of("Ω | Choose a role you can assign: Player, Moderator, Admin, or Owner."),
+            assertEquals(List.of("Ω | Choose a valid role."),
                     harness.messages);
             harness.messages.clear();
             for (String reason : List.of("x".repeat(513), "Staff\nappointment")) {
@@ -194,21 +193,24 @@ class RoleCommandTest {
     }
 
     @Test
-    void staffUsageAndValidationListOnlyAssignableRoles() throws Exception {
+    void staffUsageOmitsCompletionChoicesAndValidationExplainsTheRestriction() throws Exception {
         try (Harness harness = new Harness()) {
             Player player = harness.player();
             CommandSourceStack source = source(player, player);
             harness.authorities.put(player, new AuthorizationSnapshot(UUID.randomUUID(), Role.ADMIN, 1));
             assertEquals(0, harness.dispatcher.execute("role set", source));
-            assertEquals(List.of("Ω | Set a player's role\n  Command: /role set <player> <role> <reason>"
-                    + "\n  Roles you can assign: Player or Moderator"), harness.messages);
+            assertEquals(List.of("Ω | Change a player's role\n  Command: /role set <player> <role> <reason>"),
+                    harness.messages);
             harness.messages.clear();
             assertEquals(0, harness.dispatcher.execute("role set " + harness.target + " UNKNOWN Staff appointment", source));
-            assertEquals(List.of("Ω | Choose a role you can assign: Player or Moderator."), harness.messages);
+            assertEquals(List.of("Ω | Choose a valid role."), harness.messages);
             harness.messages.clear();
             assertEquals(0, harness.dispatcher.execute(harness.command, source));
-            assertEquals(List.of("Ω | You can assign Player or Moderator."
-                    + " Only the server console can assign Owner."), harness.messages);
+            assertEquals(List.of("Ω | You can only assign roles below your own."), harness.messages);
+            harness.messages.clear();
+            assertEquals(0, harness.dispatcher.execute(
+                    "role set " + harness.target + " OWNER Staff appointment", source));
+            assertEquals(List.of("Ω | Only the server console can assign Owner."), harness.messages);
             assertEquals(0, harness.repository.calls);
         }
     }

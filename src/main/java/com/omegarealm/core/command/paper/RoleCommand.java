@@ -91,9 +91,8 @@ public final class RoleCommand {
 
     private int usage(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
         AuthorizationActor actor = access.require(CommandCatalog.ROLE, context);
-        CommandMessages.sendPanel(context.getSource().getSender(), "Set a player's role", List.of(
-                CommandMessages.Field.normal("Command", CommandCatalog.usage(CommandCatalog.ROLE, actor)),
-                CommandMessages.Field.normal("Roles you can assign", CommandCatalog.assignableRoleNames(actor))));
+        CommandMessages.sendPanel(context.getSource().getSender(), CommandCatalog.ROLE.description(), List.of(
+                CommandMessages.Field.normal("Command", CommandCatalog.ROLE.usage(actor))));
         return 0;
     }
 
@@ -117,7 +116,7 @@ public final class RoleCommand {
             role = Role.valueOf(StringArgumentType.getString(context, "role").toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException invalid) {
             CommandMessages.send(sender, CommandMessages.Kind.ERROR,
-                    "Choose a role you can assign: " + CommandCatalog.assignableRoleNames(actor) + ".");
+                    "Choose a valid role.");
             record(actor, Outcome.DENIED, operationId, null);
             return 0;
         }
@@ -143,8 +142,9 @@ public final class RoleCommand {
         }
         if (!CommandCatalog.canAssign(actor, role)) {
             CommandMessages.send(sender, CommandMessages.Kind.ERROR,
-                    "You can assign " + CommandCatalog.assignableRoleNames(actor)
-                            + ". Only the server console can assign Owner.");
+                    role == Role.OWNER
+                            ? "Only the server console can assign Owner."
+                            : "You can only assign roles below your own.");
             record(actor, Outcome.DENIED, operationId, null);
             return 0;
         }
