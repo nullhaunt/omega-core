@@ -1,5 +1,6 @@
 package com.omegarealm.core.command.paper;
 
+import com.mojang.brigadier.arguments.ArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
@@ -61,13 +62,13 @@ public final class RoleCommand {
         audit.record(actor, CommandCatalog.ROLE.category(), "role.set", outcome, operationId, mutationAuditId);
     }
 
-    public LiteralCommandNode<CommandSourceStack> node() {
+    public LiteralCommandNode<CommandSourceStack> node(ArgumentType<?> targetType) {
         return Commands.literal(CommandCatalog.ROLE.name())
                 .requires(source -> access.allows(CommandCatalog.ROLE, source))
                 .executes(this::usage)
                 .then(Commands.literal("set")
                         .executes(this::usage)
-                        .then(Commands.argument("target", StringArgumentType.word())
+                        .then(Commands.argument("target", targetType)
                                 .suggests((context, builder) -> targetSuggestions.suggest(
                                         CommandCatalog.ROLE, context, builder))
                                 .executes(this::usage)
@@ -103,7 +104,7 @@ public final class RoleCommand {
         var sender = source.getSender();
         PlayerTarget target;
         try {
-            target = PlayerTarget.parse(StringArgumentType.getString(context, "target"));
+            target = PlayerTargetArgument.parse(context);
         } catch (IllegalArgumentException invalid) {
             CommandMessages.send(sender, CommandMessages.Kind.ERROR,
                     "Enter a current username or full player ID (UUID).");

@@ -1,6 +1,7 @@
 package com.omegarealm.core.command.paper;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.omegarealm.core.RuntimeState;
 import com.omegarealm.core.authorization.AuthorizationSnapshot;
@@ -46,6 +47,15 @@ class ProfileCommandTest {
         harness.complete(bedrock, PlayerTargetResolution.found(publicProfile));
         harness.replies.remove().run();
         assertEquals(List.of(publicProfile, publicProfile), harness.presented);
+    }
+
+    @Test
+    void explicitUuidStillUsesPersistedResolution() throws Exception {
+        Harness harness = new Harness();
+        UUID offlineUuid = UUID.randomUUID();
+
+        assertEquals(1, harness.dispatcher.execute("profile " + offlineUuid, harness.playerSource()));
+        assertEquals(List.of(new PlayerTarget.ByUuid(offlineUuid)), harness.requests);
     }
 
     @Test
@@ -164,7 +174,7 @@ class ProfileCommandTest {
                     () -> {
                         throw new AssertionError("Scheduling must remain available");
                     }, new OnlinePlayerTargetSuggestions(access, () -> onlinePlayers));
-            dispatcher.getRoot().addChild(command.node());
+            dispatcher.getRoot().addChild(command.node(StringArgumentType.greedyString()));
         }
 
         private Player namedPlayer(String name) {

@@ -6,6 +6,7 @@ import com.omegarealm.core.player.PlayerService;
 import com.omegarealm.core.player.paper.ProfileDialog;
 import com.omegarealm.core.scheduler.OmegaScheduler;
 import io.papermc.paper.command.brigadier.Commands;
+import io.papermc.paper.command.brigadier.argument.ArgumentTypes;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
@@ -43,10 +44,14 @@ public final class OmegaCommands {
     }
 
     public void register(Commands registrar) {
-        Set<String> roleLabels = registrar.register(roles.node(), CommandCatalog.ROLE.description(),
-                CommandCatalog.ROLE.aliases());
-        Set<String> profileLabels = registrar.register(profiles.node(), CommandCatalog.PROFILE.description(),
-                CommandCatalog.PROFILE.aliases());
+        // The native type supplies player completion to clients. Omega still resolves the
+        // typed name or UUID from its own persisted player records during execution.
+        var targetType = ArgumentTypes.playerProfiles();
+
+        Set<String> roleLabels = registrar.register(roles.node(targetType),
+                CommandCatalog.ROLE.description(), CommandCatalog.ROLE.aliases());
+        Set<String> profileLabels = registrar.register(profiles.node(targetType),
+                CommandCatalog.PROFILE.description(), CommandCatalog.PROFILE.aliases());
         Set<String> helpLabels = registrar.register(help.node(), CommandCatalog.HELP.description(),
                 CommandCatalog.HELP.aliases());
         Set<String> buildLabels = registrar.register(diagnostics.buildNode(), CommandCatalog.BUILD.description(),

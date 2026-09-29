@@ -93,7 +93,10 @@ matches the player's current stored username exactly, ignoring ASCII case. Old n
 partial names and players who have never joined do not resolve. If more than one UUID has
 the same stored name, use a canonical UUID; Omega will not guess. No external identity
 service is queried. Online names are suggested as the target is typed; offline names and
-UUIDs can still be entered directly. Suggestions do not bypass the persisted lookup.
+UUIDs can still be entered directly. `/role set` and `/profile` advertise a player-profile
+target to clients so Bedrock can offer online player names. Command execution still uses
+Omega's persisted lookup; it does not resolve identities through Paper or Mojang.
+Suggestions do not bypass the persisted lookup.
 UUIDs remain the identity used for role writes and audits. Role names
 accept either case; a reason of 1-512 characters is required. Command execution queues
 the target lookup and any resulting role write on the existing I/O worker without blocking

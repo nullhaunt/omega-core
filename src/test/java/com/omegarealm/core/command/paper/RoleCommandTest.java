@@ -1,6 +1,7 @@
 package com.omegarealm.core.command.paper;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.omegarealm.core.RuntimeState;
 import com.omegarealm.core.authorization.*;
@@ -447,7 +448,8 @@ class RoleCommandTest {
             dispatcher.getRoot().addChild(new RoleCommand(access, () -> service, scheduler,
                     audit, logger, () -> fail("Unexpected scheduling failure"),
                     (player, reply) -> playerReplies.add(reply),
-                    new OnlinePlayerTargetSuggestions(access, () -> onlinePlayers)).node());
+                    new OnlinePlayerTargetSuggestions(access, () -> onlinePlayers)).node(
+                    StringArgumentType.word()));
         }
 
         private Player player() {
