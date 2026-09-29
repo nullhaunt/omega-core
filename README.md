@@ -164,22 +164,31 @@ durable command-audit queue is unavailable because they do not change server sta
 Their namespaced paths are `omegacore:build` and `omegacore:status`.
 
 When Floodgate is installed, Omega recovers Java-visible Bedrock skins left on Floodgate's
-signed Steve placeholder. Each Bedrock join makes one asynchronous request for the account's
-most recently converted, signed texture from Geyser's Global API. Omega changes the Paper
-profile only if the same player is still connected and Floodgate has not already supplied a
-different skin. There are at most 32 concurrent lookups, with an eight-second HTTP deadline
-and a 32 KiB response limit. Quit and shutdown cancel pending lookups; HTTP failure leaves
-the existing skin in place. Floodgate is optional for Java-only servers, and no skin plugin
-or configuration key is added. A recently changed Bedrock skin may remain on its previous
-conversion until Geyser's Global API has processed the new skin.
+signed Steve placeholder. Install the same shaded Omega JAR in Paper's `plugins/` and
+Geyser Standalone's `extensions/` directories. Its Geyser entry point sends hashes of the
+current 64x64 classic Bedrock skin to Paper after the Java connection is ready. It sends no
+skin image bytes. Omega requests Geyser Global API's signed conversion asynchronously and
+applies it only when the API skin hash matches the current client's skin. If conversion is
+still pending, Omega schedules up to eight further checks over about eight minutes while the
+same player remains connected. Each request uses a fresh cache key because the public API can
+continue serving an older conversion after an upload. A prior conversion cannot replace a
+newly selected Bedrock skin. A matching conversion can replace an older signed texture on the
+Paper profile. Persona and other skin sizes are not covered by this bridge. There are at most
+32 concurrent lookups, with an eight-second HTTP deadline and a 32 KiB response limit. Quit
+and shutdown cancel pending lookups and retry tasks; HTTP failure leaves the existing skin in
+place.
+Floodgate is optional for Java-only servers, and no third-party skin plugin or configuration
+key is added.
 
-Fresh ADMIN/OWNER players and the actual local console can run `skin refresh <player>` for
-one connected Floodgate player, using their current name or UUID. The command repeats the
-bounded lookup and re-registers that player's profile for Java viewers, even if its signed
-texture is unchanged. It cannot fetch an offline player's live Bedrock skin. `omegacore:skin`
-has the same access policy. Accepted invocations enter the durable `MANAGEMENT` command audit
-queue before the refresh starts; the completion outcome goes to a still-connected requester
-and the operational log. An `INVOKED` row records acceptance, not proof that the skin changed.
+An isolated Paper 26.3 build-135, Geyser Standalone 2.11.3-b1247 and Floodgate run with real
+Java and Bedrock clients confirmed the initial classic skin and a changed classic skin after
+the matching signed conversion became readable. The changed skin took about a minute to
+reach Java in that run; timing depends on Geyser's conversion service. Bedrock saw its new
+skin sooner. Live deployment, other skin formats, Folia and production load remain unverified.
+
+Skin recovery starts automatically when the Bedrock player joins. Rejoining starts a fresh
+check. Omega cannot force Geyser's conversion to complete, so it does not expose a manual skin
+refresh command. The bridge does not have an offline player's current Bedrock skin.
 
 Authorized staff receive usage guidance for incomplete commands and specific target, role and
 reason validation messages. Missing or ambiguous names have distinct replies. Self-changes
@@ -367,7 +376,10 @@ together. Keep exactly one Floodgate, ViaVersion and ViaBackwards JAR in `run/pl
 Keep `Geyser-Standalone.jar`, its configured `config.yml` and Floodgate `key.pem` in
 `run/geyser-standalone/`; the matching Floodgate key must also be present in
 `run/plugins/floodgate/`. These files are local operator data and are not downloaded or
-replaced by Gradle. Start `runServer` from the shell that supplies Omega's database
+replaced by Gradle. `runServer` copies Omega's shaded JAR to
+`run/geyser-standalone/extensions/OmegaCoreSkinBridge.jar` before starting Geyser. For a
+manual deployment, copy that same JAR to both locations before restarting Paper and Geyser.
+Start `runServer` from the shell that supplies Omega's database
 password environment variable. Paper keeps its 8 GB JVM settings; Geyser has a 1 GB
 maximum heap and writes output to `run/geyser-standalone/gradle-geyser.log`.
 When Paper exits, the task sends Geyser its stop command and then ends any bridge

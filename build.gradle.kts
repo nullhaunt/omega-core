@@ -144,7 +144,10 @@ repositories {
     maven {
         url = uri("https://repo.opencollab.dev/main/")
         content {
-            includeGroup("org.geysermc.floodgate")
+            includeGroupByRegex("org\\.geysermc(\\..*)?")
+            includeGroupByRegex("org\\.cloudburstmc(\\..*)?")
+            includeGroup("org.spongepowered")
+            includeGroupByRegex("com\\.nukkitx(\\..*)?")
         }
     }
 }
@@ -154,6 +157,8 @@ dependencies {
     compileOnly("org.geysermc.floodgate:api:2.2.5-SNAPSHOT") {
         isTransitive = false
     }
+    compileOnly("org.geysermc.geyser:api:2.11.3-SNAPSHOT")
+    compileOnly("org.geysermc.geyser:core:2.11.3-SNAPSHOT")
 
     implementation("com.zaxxer:HikariCP:7.1.0")
     implementation("org.postgresql:postgresql:42.7.13")
@@ -195,6 +200,7 @@ java {
 val java25Launcher = javaToolchains.launcherFor {
     languageVersion.set(JavaLanguageVersion.of(25))
 }
+val shadedPluginFile = layout.buildDirectory.file("libs/${project.name}-${project.version}-all.jar")
 
 tasks {
     check {
@@ -226,7 +232,9 @@ tasks {
 
     runServer {
         val service = geyserProcess
+        val shadedJar = shadedPluginFile.get().asFile
 
+        dependsOn(shadowJar)
         minecraftVersion("26.3")
         jvmArgs("-Xms8G", "-Xmx8G", "-Dcom.mojang.eula.agree=true")
         javaLauncher.set(java25Launcher)
@@ -259,6 +267,11 @@ tasks {
                 throw GradleException("Missing Floodgate key in $pluginsDirectory/floodgate. Restore the matching key before running Paper.")
             }
 
+            val extensions = geyserDirectory.resolve("extensions")
+            extensions.mkdirs()
+            shadedJar.copyTo(
+                extensions.resolve("OmegaCoreSkinBridge.jar"), overwrite = true)
+
             service.get().start(serverTask.javaLauncher.get().executablePath.asFile, geyserDirectory)
         }
 
@@ -271,6 +284,9 @@ tasks {
         from(generateBuildIdentity)
         val props = mapOf("version" to version, "description" to project.description)
         filesMatching("plugin.yml") {
+            expand(props)
+        }
+        filesMatching("extension.yml") {
             expand(props)
         }
     }

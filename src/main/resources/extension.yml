@@ -1,0 +1,6 @@
+id: omegacore
+name: OmegaCoreSkinBridge
+main: com.omegarealm.core.player.geyser.OmegaGeyserSkinExtension
+api: 2.11.0
+version: ${version}
+authors: [ Unreference ]

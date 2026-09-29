@@ -4,7 +4,6 @@ import com.mojang.brigadier.tree.LiteralCommandNode;
 import com.omegarealm.core.diagnostics.BuildIdentity;
 import com.omegarealm.core.diagnostics.RuntimeDiagnostics;
 import com.omegarealm.core.player.PlayerService;
-import com.omegarealm.core.player.paper.BedrockSkinAdapter;
 import com.omegarealm.core.player.paper.ProfileDialog;
 import com.omegarealm.core.scheduler.OmegaScheduler;
 import io.papermc.paper.command.brigadier.CommandSourceStack;
@@ -30,14 +29,12 @@ public final class OmegaCommands {
     private final ProfileCommand profiles;
     private final HelpCommand help;
     private final DiagnosticsCommand diagnostics;
-    private final SkinCommand skins;
     private volatile Set<String> registered = Set.of();
 
     public OmegaCommands(CommandAccess access, Supplier<PlayerService> players,
                          BuildIdentity build, Supplier<RuntimeDiagnostics> runtime,
                          OmegaScheduler scheduler, CommandAudit audit, Logger logger,
-                         Runnable schedulingFailure, BiConsumer<Player, Runnable> playerReply,
-                         Supplier<BedrockSkinAdapter> bedrockSkins) {
+                         Runnable schedulingFailure, BiConsumer<Player, Runnable> playerReply) {
         Objects.requireNonNull(access, "access");
         OnlinePlayerTargetSuggestions targetSuggestions =
                 new OnlinePlayerTargetSuggestions(access, Bukkit::getOnlinePlayers);
@@ -47,8 +44,6 @@ public final class OmegaCommands {
                 ProfileDialog::show, logger, schedulingFailure, targetSuggestions);
         help = new HelpCommand(access);
         diagnostics = new DiagnosticsCommand(access, build, runtime, audit);
-        skins = new SkinCommand(access, bedrockSkins, scheduler, audit, logger,
-                schedulingFailure, playerReply, targetSuggestions);
     }
 
     public void register(Commands registrar) {
@@ -63,8 +58,7 @@ public final class OmegaCommands {
                 new Registration(CommandCatalog.PROFILE, profiles.node(targetType)),
                 new Registration(CommandCatalog.BUILD, diagnostics.buildNode()),
                 new Registration(CommandCatalog.STATUS, diagnostics.statusNode()),
-                new Registration(CommandCatalog.ROLE, roles.node(targetType)),
-                new Registration(CommandCatalog.SKIN, skins.node(targetType)));
+                new Registration(CommandCatalog.ROLE, roles.node(targetType)));
         List<CommandCatalog.Definition> registeredDefinitions = commands.stream()
                 .map(Registration::definition)
                 .toList();

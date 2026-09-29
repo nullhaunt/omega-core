@@ -15,9 +15,11 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Flow;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -38,6 +40,7 @@ final class ConvertedBedrockSkinLookup implements AutoCloseable {
 
     private final HttpClient client;
     private final URI endpoint;
+    private final AtomicLong cacheKeys = new AtomicLong();
 
     ConvertedBedrockSkinLookup() {
         this(HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build(), SKIN_API);
@@ -58,8 +61,10 @@ final class ConvertedBedrockSkinLookup implements AutoCloseable {
             JsonObject object = parsed.getAsJsonObject();
             String value = string(object, "value");
             String signature = string(object, "signature");
+            String hash = string(object, "hash");
             if (value == null || value.isBlank() || value.length() > MAX_VALUE_LENGTH
-                    || signature == null || signature.isBlank() || signature.length() > MAX_SIGNATURE_LENGTH) {
+                    || signature == null || signature.isBlank() || signature.length() > MAX_SIGNATURE_LENGTH
+                    || hash == null || !hash.matches("(?i:[a-f0-9]{64})")) {
                 return Optional.empty();
             }
 
@@ -78,25 +83,9 @@ final class ConvertedBedrockSkinLookup implements AutoCloseable {
                 return Optional.empty();
             }
 
-            // last_update can predate this login when Geyser reuses an unchanged skin.
-            return Optional.of(new SignedSkin(value, signature));
+            return Optional.of(new SignedSkin(value, signature, hash.toLowerCase(Locale.ROOT)));
         } catch (RuntimeException invalid) {
             return Optional.empty();
-        }
-    }
-
-    static boolean isFloodgatePlaceholder(String value) {
-        try {
-            String decoded = new String(Base64.getDecoder().decode(value), StandardCharsets.UTF_8);
-            JsonObject textures = JsonParser.parseString(decoded).getAsJsonObject()
-                    .getAsJsonObject("textures");
-            JsonObject skin = textures == null ? null : textures.getAsJsonObject("SKIN");
-            String url = skin == null ? null : string(skin, "url");
-            Matcher texture = url == null ? null : TEXTURE_URL.matcher(url);
-            return texture != null && texture.matches()
-                    && FLOODGATE_PLACEHOLDER.equalsIgnoreCase(texture.group(1));
-        } catch (RuntimeException invalid) {
-            return false;
         }
     }
 
@@ -111,7 +100,11 @@ final class ConvertedBedrockSkinLookup implements AutoCloseable {
             return CompletableFuture.completedFuture(Optional.empty());
         }
 
-        HttpRequest request = HttpRequest.newBuilder(endpoint.resolve(xuid))
+        // The public endpoint can keep serving a previous conversion after Geyser
+        // uploads a changed skin. A unique query requests a fresh cache entry.
+        URI skinUri = endpoint.resolve(xuid + "?omega-refresh=" + System.currentTimeMillis()
+                + "-" + cacheKeys.incrementAndGet());
+        HttpRequest request = HttpRequest.newBuilder(skinUri)
                 .timeout(Duration.ofSeconds(8))
                 .header("User-Agent", "OmegaCore/BedrockSkin")
                 .GET()
@@ -125,9 +118,14 @@ final class ConvertedBedrockSkinLookup implements AutoCloseable {
                 result.completeExceptionally(failure);
             } else {
                 try {
-                    result.complete(response.statusCode() == 200
-                            ? parse(new String(response.body(), StandardCharsets.UTF_8))
-                            : Optional.empty());
+                    if (response.statusCode() == 200) {
+                        result.complete(parse(new String(response.body(), StandardCharsets.UTF_8)));
+                    } else if (response.statusCode() == 204 || response.statusCode() == 404) {
+                        result.complete(Optional.empty());
+                    } else {
+                        result.completeExceptionally(
+                                new IOException("Converted Bedrock skin service is unavailable."));
+                    }
                 } catch (RuntimeException invalid) {
                     result.completeExceptionally(invalid);
                 }
@@ -149,7 +147,7 @@ final class ConvertedBedrockSkinLookup implements AutoCloseable {
         }
     }
 
-    record SignedSkin(String value, String signature) {
+    record SignedSkin(String value, String signature, String hash) {
     }
 
     /**

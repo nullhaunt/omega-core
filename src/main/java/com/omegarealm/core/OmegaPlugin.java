@@ -14,6 +14,7 @@ import com.omegarealm.core.diagnostics.BuildIdentity;
 import com.omegarealm.core.lifecycle.AdmissionGuard;
 import com.omegarealm.core.player.paper.BedrockSkinAdapter;
 import com.omegarealm.core.player.paper.PlayerConnectionAdapter;
+import com.omegarealm.core.player.skin.BedrockSkinFingerprint;
 import com.omegarealm.core.scheduler.OmegaScheduler;
 import com.omegarealm.core.scheduler.paper.PaperOmegaScheduler;
 import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents;
@@ -64,7 +65,7 @@ public final class OmegaPlugin extends JavaPlugin implements Listener {
             OmegaCommands commands = new OmegaCommands(commandAccess, runtime::players,
                     build, runtime::diagnostics,
                     scheduler, commandAudit, getLogger(), this::schedulingFailed,
-                    playerConnections::reply, () -> bedrockSkins);
+                    playerConnections::reply);
             nativeCommands = new NativeCommandFence(this, playerPermissions, commandAccess,
                     commandAudit, commands, runtime::failPlayerHandling,
                     () -> state() == RuntimeState.READY, runtime::start);
@@ -110,12 +111,20 @@ public final class OmegaPlugin extends JavaPlugin implements Listener {
         }
 
         BedrockSkinAdapter started = null;
+        boolean channelRegistered = false;
         try {
             started = new BedrockSkinAdapter(this, this::state, getLogger());
+            getServer().getMessenger().registerIncomingPluginChannel(this,
+                    BedrockSkinFingerprint.CHANNEL, started);
+            channelRegistered = true;
             getServer().getPluginManager().registerEvents(started, this);
             bedrockSkins = started;
             getLogger().info("Bedrock skin recovery is ready.");
         } catch (RuntimeException | LinkageError unavailable) {
+            if (channelRegistered) {
+                getServer().getMessenger().unregisterIncomingPluginChannel(this,
+                        BedrockSkinFingerprint.CHANNEL, started);
+            }
             if (started != null) {
                 started.close();
             }
@@ -130,6 +139,8 @@ public final class OmegaPlugin extends JavaPlugin implements Listener {
         }
 
         if (bedrockSkins != null) {
+            getServer().getMessenger().unregisterIncomingPluginChannel(this,
+                    BedrockSkinFingerprint.CHANNEL, bedrockSkins);
             bedrockSkins.close();
         }
         if (scheduler != null) {

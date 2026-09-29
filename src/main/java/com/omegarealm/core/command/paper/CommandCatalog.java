@@ -25,12 +25,10 @@ public final class CommandCatalog {
             "Check the server's status", Role.ADMIN, Category.MANAGEMENT, List.of(), false);
     public static final Definition ROLE = new Definition("role", "role set <player> <role> <reason>",
             "Change a player's role", Role.ADMIN, Category.MANAGEMENT, List.of(), false);
-    public static final Definition SKIN = new Definition("skin", "skin refresh <player>",
-            "Refresh a Bedrock player's skin", Role.ADMIN, Category.MANAGEMENT, List.of(), false);
     public static final Definition PROFILE = new Definition("profile", "profile [player]",
             "View a player's profile", Role.PLAYER, null, List.of(), true);
 
-    private static final List<Definition> DEFINITIONS = List.of(HELP, PROFILE, BUILD, STATUS, ROLE, SKIN);
+    private static final List<Definition> DEFINITIONS = List.of(HELP, PROFILE, BUILD, STATUS, ROLE);
     private static final Map<String, Definition> LABELS = DEFINITIONS.stream()
             .flatMap(definition -> definition.labels().stream().map(label -> Map.entry(label, definition)))
             .collect(Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));
