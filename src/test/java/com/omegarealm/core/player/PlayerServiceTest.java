@@ -187,6 +187,35 @@ class PlayerServiceTest {
     }
 
     @Test
+    void targetSuggestionsShareTheWorkerQueueAndStopDiscardsAnInFlightRead() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        repository.suggestions = prefix -> {
+            assertEquals("Aer", prefix);
+            entered.countDown();
+            waitFor(release);
+            return List.of("Aeron");
+        };
+        PlayerServiceLimits bounded = limits(1, 256, Duration.ofSeconds(3), Duration.ofSeconds(3),
+                Duration.ofSeconds(3), Duration.ofSeconds(30), Duration.ofSeconds(3));
+        try (Harness harness = new Harness(repository, bounded)) {
+            assertEquals(List.of(), await(harness.service.suggestTargets("%")));
+            CompletionStage<List<String>> pending = harness.service.suggestTargets("Aer");
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            assertFalse(pending.toCompletableFuture().isDone());
+            assertFailure(BUSY, harness.service.resolveTarget(new PlayerTarget.ByName("Aeron")));
+            harness.service.requestStop(JOINED.plusSeconds(1));
+            assertFailure(UNAVAILABLE, pending);
+            release.countDown();
+            harness.barrier();
+            assertFailure(UNAVAILABLE, pending);
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
     void stopRejectsAnInFlightTargetReadEvenWhenTheRepositoryReturnsLater() throws Exception {
         FakeRepository repository = new FakeRepository();
         UUID uuid = UUID.randomUUID();
@@ -1347,6 +1376,7 @@ class PlayerServiceTest {
         private volatile Function<RoleChangeRequest, RoleChangeResult> roleMutation;
         private volatile Function<PlayerTarget, PlayerTargetResolution> targetResolution =
                 target -> PlayerTargetResolution.missing();
+        private volatile Function<String, List<String>> suggestions = prefix -> List.of();
         private volatile Consumer<SessionStart> join = start -> {
         };
         private volatile Runnable end = () -> {
@@ -1417,6 +1447,12 @@ class PlayerServiceTest {
         public RoleChangeResult changeRole(RoleChangeRequest request) {
             assertOwner();
             return roleMutation.apply(request);
+        }
+
+        @Override
+        public java.util.List<String> suggestTargets(String prefix) {
+            assertOwner();
+            return suggestions.apply(prefix);
         }
 
         @Override

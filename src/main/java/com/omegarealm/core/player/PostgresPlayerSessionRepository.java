@@ -595,6 +595,39 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
         }
     }
 
+    @Override
+    public List<String> suggestTargets(String prefix) throws PersistenceException {
+        if (!PlayerTarget.validNamePrefix(prefix)) {
+            throw new IllegalArgumentException("Invalid player-name prefix.");
+        }
+        String pattern = NicknamePolicy.key(prefix).replace("_", "!_") + "%";
+        return transaction("player target suggestions", () -> {
+            try (PreparedStatement statement = prepare(connection, """
+                    WITH names AS (
+                        (SELECT username AS name FROM players
+                         WHERE lower(username) LIKE ? ESCAPE '!'
+                         ORDER BY lower(username), username LIMIT 64)
+                        UNION ALL
+                        (SELECT nickname AS name FROM player_nicknames
+                         WHERE lower(nickname COLLATE "C") LIKE ? ESCAPE '!'
+                         ORDER BY lower(nickname COLLATE "C"), nickname LIMIT 64)
+                    )
+                    SELECT min(name COLLATE "C") AS name FROM names
+                    GROUP BY lower(name COLLATE "C") ORDER BY lower(name COLLATE "C") LIMIT 64
+                    """)) {
+                statement.setString(1, pattern);
+                statement.setString(2, pattern);
+                try (ResultSet rows = statement.executeQuery()) {
+                    List<String> names = new ArrayList<>();
+                    while (rows.next()) {
+                        names.add(rows.getString("name"));
+                    }
+                    return List.copyOf(names);
+                }
+            }
+        });
+    }
+
     private LoadedPlayer selectLoadedPlayer(UUID playerUuid) throws SQLException {
         try (PreparedStatement statement = prepare(connection, """
                 SELECT p.uuid, p.username, p.first_seen_at, p.last_seen_at, a.role, a.revision

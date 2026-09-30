@@ -65,7 +65,7 @@ public final class OmegaPlugin extends JavaPlugin implements Listener {
             OmegaCommands commands = new OmegaCommands(commandAccess, runtime::players,
                     build, runtime::diagnostics,
                     scheduler, commandAudit, getLogger(), this::schedulingFailed,
-                    playerConnections::reply);
+                    playerConnections::reply, playerConnections::profileToken);
             nativeCommands = new NativeCommandFence(this, playerPermissions, commandAccess,
                     commandAudit, commands, runtime::failPlayerHandling,
                     () -> state() == RuntimeState.READY, runtime::start);

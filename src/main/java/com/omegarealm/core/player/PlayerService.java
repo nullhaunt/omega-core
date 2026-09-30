@@ -43,7 +43,7 @@ public final class PlayerService implements PlayerTargetResolver {
     private final ArrayDeque<Work> mailbox = new ArrayDeque<>();
     private final ArrayDeque<CommandAuditEvent> shutdownAudits = new ArrayDeque<>();
     private final Set<RoleMutation> roleChanges = new HashSet<>();
-    private final Set<TargetLookup> targetLookups = new HashSet<>();
+    private final Set<TargetLookup<?>> targetLookups = new HashSet<>();
     private final Set<ProfileTask<?>> profileOperations = new HashSet<>();
     private State state = State.STARTING;
     private boolean pumpScheduled;
@@ -312,7 +312,18 @@ public final class PlayerService implements PlayerTargetResolver {
     @Override
     public CompletionStage<PlayerTargetResolution> resolveTarget(PlayerTarget target) {
         Objects.requireNonNull(target, "target");
-        TargetLookup lookup = new TargetLookup(target);
+        return submitTargetRead(repository -> repository.resolveTarget(target));
+    }
+
+    public CompletionStage<List<String>> suggestTargets(String prefix) {
+        if (!PlayerTarget.validNamePrefix(prefix)) {
+            return CompletableFuture.completedStage(List.of());
+        }
+        return submitTargetRead(repository -> repository.suggestTargets(prefix));
+    }
+
+    private <T> CompletionStage<T> submitTargetRead(TargetRead<T> read) {
+        TargetLookup<T> lookup = new TargetLookup<>(read);
         try {
             synchronized (ownership) {
                 if (state != State.RUNNING) {
@@ -947,8 +958,8 @@ public final class PlayerService implements PlayerTargetResolver {
         }
     }
 
-    private Runnable resolveTargetOnWorker(TargetLookup lookup) throws PersistenceException {
-        PlayerTargetResolution resolution = repository.resolveTarget(lookup.target);
+    private <T> Runnable resolveTargetOnWorker(TargetLookup<T> lookup) throws PersistenceException {
+        T result = lookup.read.execute(repository);
         return () -> {
             boolean publish;
             synchronized (ownership) {
@@ -957,7 +968,7 @@ public final class PlayerService implements PlayerTargetResolver {
                 cancel(lookup.deadline);
             }
             if (publish) {
-                lookup.result.complete(resolution);
+                lookup.result.complete(result);
             } else {
                 lookup.result.completeExceptionally(new PlayerOperationException(Kind.UNAVAILABLE));
             }
@@ -1011,12 +1022,12 @@ public final class PlayerService implements PlayerTargetResolver {
     }
 
     private void rejectTargetLookups() {
-        List<TargetLookup> pending;
+        List<TargetLookup<?>> pending;
         synchronized (ownership) {
             pending = List.copyOf(targetLookups);
             targetLookups.clear();
         }
-        for (TargetLookup lookup : pending) {
+        for (TargetLookup<?> lookup : pending) {
             lookup.result.completeExceptionally(new PlayerOperationException(Kind.UNAVAILABLE));
         }
     }
@@ -1088,7 +1099,7 @@ public final class PlayerService implements PlayerTargetResolver {
         for (RoleMutation mutation : roleChanges) {
             cancel(mutation.deadline);
         }
-        for (TargetLookup lookup : targetLookups) {
+        for (TargetLookup<?> lookup : targetLookups) {
             cancel(lookup.deadline);
         }
         for (ProfileTask<?> task : profileOperations) {
@@ -1128,10 +1139,15 @@ public final class PlayerService implements PlayerTargetResolver {
         T execute(PlayerProfileRepository repository, UUID playerUuid) throws PersistenceException;
     }
 
+    @FunctionalInterface
+    private interface TargetRead<T> {
+        T execute(PlayerSessionRepository repository) throws PersistenceException;
+    }
+
     private record Work(Entry entry, Operation operation, RoleMutation mutation,
-                        CommandAuditEvent commandAudit, TargetLookup targetLookup, ProfileTask<?> profileTask) {
+                        CommandAuditEvent commandAudit, TargetLookup<?> targetLookup, ProfileTask<?> profileTask) {
         private Work(Entry entry, Operation operation, RoleMutation mutation,
-                     CommandAuditEvent commandAudit, TargetLookup targetLookup) {
+                     CommandAuditEvent commandAudit, TargetLookup<?> targetLookup) {
             this(entry, operation, mutation, commandAudit, targetLookup, null);
         }
 
@@ -1148,13 +1164,13 @@ public final class PlayerService implements PlayerTargetResolver {
         }
     }
 
-    private static final class TargetLookup {
-        private final PlayerTarget target;
-        private final CompletableFuture<PlayerTargetResolution> result = new CompletableFuture<>();
+    private static final class TargetLookup<T> {
+        private final TargetRead<T> read;
+        private final CompletableFuture<T> result = new CompletableFuture<>();
         private ScheduledFuture<?> deadline;
 
-        private TargetLookup(PlayerTarget target) {
-            this.target = target;
+        private TargetLookup(TargetRead<T> read) {
+            this.read = read;
         }
     }
 

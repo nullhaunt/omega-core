@@ -9,6 +9,10 @@ import java.util.UUID;
  */
 public sealed interface PlayerTarget permits PlayerTarget.ByUuid, PlayerTarget.ByName {
 
+    static boolean validNamePrefix(String prefix) {
+        return prefix != null && prefix.matches("(?:[A-Za-z0-9_]{0,16}|\\.[A-Za-z0-9_]{0,15})");
+    }
+
     static PlayerTarget parse(String input) {
         Objects.requireNonNull(input, "input");
         if (input.length() == 36) {

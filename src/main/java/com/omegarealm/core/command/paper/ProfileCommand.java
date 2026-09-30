@@ -30,13 +30,13 @@ final class ProfileCommand {
     private final BiConsumer<Player, PublicPlayerProfile> presenter;
     private final Logger logger;
     private final Runnable schedulingFailure;
-    private final OnlinePlayerTargetSuggestions targetSuggestions;
+    private final PlayerTargetSuggestions targetSuggestions;
 
     ProfileCommand(CommandAccess access, Supplier<PlayerTargetResolver> targets,
                    BiConsumer<Player, Runnable> playerReply,
                    BiConsumer<Player, PublicPlayerProfile> presenter,
                    Logger logger, Runnable schedulingFailure,
-                   OnlinePlayerTargetSuggestions targetSuggestions) {
+                   PlayerTargetSuggestions targetSuggestions) {
         this.access = Objects.requireNonNull(access, "access");
         this.targets = Objects.requireNonNull(targets, "targets");
         this.playerReply = Objects.requireNonNull(playerReply, "playerReply");
@@ -71,7 +71,7 @@ final class ProfileCommand {
             target = PlayerTargetArgument.parse(context);
         } catch (IllegalArgumentException invalid) {
             CommandMessages.send(viewer, CommandMessages.Kind.ERROR,
-                    "Enter a current username or full player ID (UUID).");
+                    "Enter a current username, nickname, or full player ID (UUID).");
             return 0;
         }
         return lookup(viewer, target);

@@ -31,6 +31,8 @@ class HelpCommandTest {
             assertTrue(harness.messages.getFirst().startsWith("Ω | Available commands\n"));
             assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/help")));
             assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/profile")));
+            assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/nickname")));
+            assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/realname")));
             assertTrue(harness.messages.stream().noneMatch(message -> message.contains("/role")));
             assertTrue(harness.messages.stream().noneMatch(message -> message.contains("/build")));
             assertTrue(harness.messages.stream().noneMatch(message -> message.contains("/status")));
@@ -41,7 +43,8 @@ class HelpCommandTest {
             assertEquals(List.of("Ω | View a player's profile\n  Command: /profile [player]"),
                     harness.messages);
             var suggestions = harness.dispatcher.getCompletionSuggestions(harness.dispatcher.parse("help r", source)).get();
-            assertTrue(suggestions.isEmpty());
+            assertEquals(List.of("realname"), suggestions.getList().stream()
+                    .map(com.mojang.brigadier.suggestion.Suggestion::getText).toList());
 
             harness.messages.clear();
             harness.authorities.put(player, new AuthorizationSnapshot(UUID.randomUUID(), Role.ADMIN, 2));
@@ -67,6 +70,8 @@ class HelpCommandTest {
             assertEquals(1, harness.dispatcher.execute("help", harness.source(harness.console, null)));
             assertEquals(1, harness.messages.size());
             assertTrue(harness.messages.stream().noneMatch(message -> message.contains("/profile")));
+            assertTrue(harness.messages.stream().noneMatch(message -> message.contains("/nickname")));
+            assertTrue(harness.messages.stream().anyMatch(message -> message.contains("/realname")));
         }
     }
 

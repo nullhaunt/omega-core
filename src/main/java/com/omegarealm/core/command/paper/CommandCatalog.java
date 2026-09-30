@@ -27,8 +27,12 @@ public final class CommandCatalog {
             "Change a player's role", Role.ADMIN, Category.MANAGEMENT, List.of(), false);
     public static final Definition PROFILE = new Definition("profile", "profile [player]",
             "View a player's profile", Role.PLAYER, null, List.of(), true);
+    public static final Definition NICKNAME = new Definition("nickname", "nickname [name|clear]",
+            "View, change, or clear your nickname", Role.PLAYER, null, List.of(), true);
+    public static final Definition REALNAME = new Definition("realname", "realname <player>",
+            "Find a player's account name", Role.PLAYER, null, List.of(), false);
 
-    private static final List<Definition> DEFINITIONS = List.of(HELP, PROFILE, BUILD, STATUS, ROLE);
+    private static final List<Definition> DEFINITIONS = List.of(HELP, PROFILE, NICKNAME, REALNAME, BUILD, STATUS, ROLE);
     private static final Map<String, Definition> LABELS = DEFINITIONS.stream()
             .flatMap(definition -> definition.labels().stream().map(label -> Map.entry(label, definition)))
             .collect(Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));

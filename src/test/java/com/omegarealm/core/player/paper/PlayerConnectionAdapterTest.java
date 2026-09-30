@@ -108,13 +108,16 @@ class PlayerConnectionAdapterTest {
             harness.adapter.onJoin(new PlayerJoinEvent(first.player, Component.empty()));
             harness.barrier();
             assertEquals(first.uuid, harness.adapter.authorization(first.player).orElseThrow().playerUuid());
+            assertTrue(harness.adapter.profileToken(first.player).isPresent());
             Connection replacement = new Connection(1000, first.uuid);
             assertTrue(harness.adapter.authorization(replacement.player).isEmpty());
+            assertTrue(harness.adapter.profileToken(replacement.player).isEmpty());
             assertEquals(1, harness.repository.reads.get());
             assertEquals(first.uuid, harness.repository.joins.getFirst().playerUuid());
             harness.adapter.onQuit(new PlayerQuitEvent(first.player, Component.empty(), PlayerQuitEvent.QuitReason.DISCONNECTED));
             harness.barrier();
             assertTrue(harness.adapter.authorization(first.player).isEmpty());
+            assertTrue(harness.adapter.profileToken(first.player).isEmpty());
             assertEquals(List.of(SessionEnd.QUIT), harness.repository.ends);
             assertEquals(0, harness.failures.get());
         }
@@ -522,6 +525,11 @@ class PlayerConnectionAdapterTest {
         @Override
         public PlayerProfileRepository profiles() {
             return new StubPlayerProfileRepository();
+        }
+
+        @Override
+        public java.util.List<String> suggestTargets(String prefix) {
+            return java.util.List.of();
         }
 
         @Override

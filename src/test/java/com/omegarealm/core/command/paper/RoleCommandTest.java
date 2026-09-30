@@ -93,7 +93,7 @@ class RoleCommandTest {
         try (Harness harness = new Harness()) {
             CommandSourceStack source = source(harness.console, null);
             assertEquals(0, harness.dispatcher.execute("role set 1-1-1-1-1 ADMIN Staff appointment", source));
-            assertEquals(List.of("Ω | Enter a current username or full player ID (UUID)."), harness.messages);
+            assertEquals(List.of("Ω | Enter a current username, nickname, or full player ID (UUID)."), harness.messages);
             harness.messages.clear();
             assertEquals(0, harness.dispatcher.execute("role set " + harness.target + " UNKNOWN Staff appointment", source));
             assertEquals(List.of("Ω | Choose a valid role."),
@@ -319,6 +319,23 @@ class RoleCommandTest {
     }
 
     @Test
+    void nicknameTargetKeepsResolvedUuidAndAccountAwareConfirmationThroughARename() throws Exception {
+        try (Harness harness = new Harness()) {
+            harness.repository.targetNickname = "Aeron";
+            assertEquals(1, harness.dispatcher.execute("role set Aeron ADMIN Staff appointment", source(harness.console, null)));
+            assertTrue(harness.repository.entered.await(2, TimeUnit.SECONDS));
+            assertEquals(harness.target, harness.repository.request.targetUuid());
+            harness.repository.targetNickname = "Replacement";
+            harness.repository.release.countDown();
+            harness.worker.submit(() -> {
+            }).get(2, TimeUnit.SECONDS);
+            harness.replies.remove().run();
+            assertTrue(harness.messages.getLast().contains("Aeron (account: TargetPlayer) now has the Admin role."));
+            assertEquals(harness.target, harness.repository.request.targetUuid());
+        }
+    }
+
+    @Test
     void targetSuggestionsOfferConnectedNamesOnlyWithCurrentCommandAccess() throws Exception {
         try (Harness harness = new Harness()) {
             harness.onlinePlayers.add(namedPlayer("TargetPlayer"));
@@ -450,7 +467,11 @@ class RoleCommandTest {
             dispatcher.getRoot().addChild(new RoleCommand(access, () -> service, scheduler,
                     audit, logger, () -> fail("Unexpected scheduling failure"),
                     (player, reply) -> playerReplies.add(reply),
-                    new OnlinePlayerTargetSuggestions(access, () -> onlinePlayers)).node(
+                    new PlayerTargetSuggestions(access, prefix -> CompletableFuture.completedFuture(
+                            onlinePlayers.stream()
+                                    .map(Player::getName)
+                                    .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(prefix.toLowerCase(Locale.ROOT)))
+                                    .toList()))).node(
                     StringArgumentType.word()));
         }
 
@@ -488,11 +509,17 @@ class RoleCommandTest {
         private RoleChangeRequest request;
         private RoleChangeResult.Status resultStatus = RoleChangeResult.Status.CHANGED;
         private PlayerProfile targetProfile;
+        private String targetNickname;
         private boolean ambiguousTarget;
 
         @Override
         public PlayerProfileRepository profiles() {
             return new StubPlayerProfileRepository();
+        }
+
+        @Override
+        public java.util.List<String> suggestTargets(String prefix) {
+            return java.util.List.of();
         }
 
         @Override
@@ -503,8 +530,9 @@ class RoleCommandTest {
             if (targetProfile != null && (target instanceof PlayerTarget.ByUuid(UUID uuid1)
                     && targetProfile.uuid().equals(uuid1)
                     || target instanceof PlayerTarget.ByName(String username)
-                    && targetProfile.username().equalsIgnoreCase(username))) {
-                return PlayerTargetResolution.found(new PublicPlayerProfile(targetProfile, Role.PLAYER));
+                    && (targetProfile.username().equalsIgnoreCase(username)
+                    || targetNickname != null && targetNickname.equalsIgnoreCase(username)))) {
+                return PlayerTargetResolution.found(new PublicPlayerProfile(targetProfile, Role.PLAYER, Optional.ofNullable(targetNickname)));
             }
             return PlayerTargetResolution.missing();
         }

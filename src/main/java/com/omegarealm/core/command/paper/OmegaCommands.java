@@ -9,14 +9,11 @@ import com.omegarealm.core.scheduler.OmegaScheduler;
 import io.papermc.paper.command.brigadier.CommandSourceStack;
 import io.papermc.paper.command.brigadier.Commands;
 import io.papermc.paper.command.brigadier.argument.ArgumentTypes;
-import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
-import java.util.HashSet;
-import java.util.List;
-import java.util.Objects;
-import java.util.Set;
+import java.util.*;
 import java.util.function.BiConsumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
 
@@ -27,6 +24,8 @@ public final class OmegaCommands {
 
     private final RoleCommand roles;
     private final ProfileCommand profiles;
+    private final NicknameCommand nicknames;
+    private final RealnameCommand realnames;
     private final HelpCommand help;
     private final DiagnosticsCommand diagnostics;
     private volatile Set<String> registered = Set.of();
@@ -34,14 +33,18 @@ public final class OmegaCommands {
     public OmegaCommands(CommandAccess access, Supplier<PlayerService> players,
                          BuildIdentity build, Supplier<RuntimeDiagnostics> runtime,
                          OmegaScheduler scheduler, CommandAudit audit, Logger logger,
-                         Runnable schedulingFailure, BiConsumer<Player, Runnable> playerReply) {
+                         Runnable schedulingFailure, BiConsumer<Player, Runnable> playerReply,
+                         Function<Player, Optional<UUID>> connectionToken) {
         Objects.requireNonNull(access, "access");
-        OnlinePlayerTargetSuggestions targetSuggestions =
-                new OnlinePlayerTargetSuggestions(access, Bukkit::getOnlinePlayers);
+        PlayerTargetSuggestions targetSuggestions =
+                new PlayerTargetSuggestions(access, prefix -> players.get().suggestTargets(prefix));
+        CommandReplies replies = new CommandReplies(access, scheduler, playerReply, logger, schedulingFailure);
         roles = new RoleCommand(access, players, scheduler, audit, logger,
                 schedulingFailure, playerReply, targetSuggestions);
         profiles = new ProfileCommand(access, players::get, playerReply,
                 ProfileDialog::show, logger, schedulingFailure, targetSuggestions);
+        nicknames = new NicknameCommand(access, players, connectionToken, replies);
+        realnames = new RealnameCommand(access, players::get, replies, targetSuggestions);
         help = new HelpCommand(access);
         diagnostics = new DiagnosticsCommand(access, build, runtime, audit);
     }
@@ -56,6 +59,8 @@ public final class OmegaCommands {
         List<Registration> commands = List.of(
                 new Registration(CommandCatalog.HELP, help.node()),
                 new Registration(CommandCatalog.PROFILE, profiles.node(targetType)),
+                new Registration(CommandCatalog.NICKNAME, nicknames.node()),
+                new Registration(CommandCatalog.REALNAME, realnames.node(targetType)),
                 new Registration(CommandCatalog.BUILD, diagnostics.buildNode()),
                 new Registration(CommandCatalog.STATUS, diagnostics.statusNode()),
                 new Registration(CommandCatalog.ROLE, roles.node(targetType)));

@@ -129,6 +129,53 @@ class NicknamePersistenceIntegrationTest {
     }
 
     @Test
+    void targetSuggestionsUseLiteralPrefixesAndOnlyCurrentNames() throws Exception {
+        try (Database database = bootstrap(config(), "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha"); Connection admin = database.openConnection()) {
+            SessionStart owner = player("AccountName");
+            SessionStart other = player("AB_Account");
+            SessionStart bedrock = player(".Aeron");
+            repository.join(owner);
+            repository.join(other);
+            repository.join(bedrock);
+            set(repository.profiles(), owner.playerUuid(), "A_One");
+            repository.endSession(owner.sessionId(), JOINED.plusSeconds(1), SessionEnd.QUIT);
+            assertEquals(List.of("A_One"), repository.suggestTargets("a_"));
+            assertEquals(List.of(".Aeron"), repository.suggestTargets(".a"));
+            assertEquals(List.of("A_One", "AB_Account", "AccountName"), repository.suggestTargets("a"));
+
+            set(repository.profiles(), owner.playerUuid(), "Comet");
+            assertTrue(repository.suggestTargets("a_").isEmpty());
+            assertEquals(List.of("Comet"), repository.suggestTargets("COM"));
+            set(repository.profiles(), owner.playerUuid(), null);
+            assertTrue(repository.suggestTargets("Com").isEmpty());
+            assertEquals(3, count(admin, "SELECT count(*) FROM player_nickname_audit"));
+            assertEquals(0, count(admin, "SELECT count(*) FROM command_audit"));
+            assertThrows(IllegalArgumentException.class, () -> repository.suggestTargets("%"));
+        }
+    }
+
+    @Test
+    void targetSuggestionsAreBoundedAndDeduplicateAsciiCase() throws Exception {
+        try (Database database = bootstrap(config(), "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha"); Connection admin = database.openConnection()) {
+            SessionStart owner = player("Aeron");
+            repository.join(owner);
+            set(repository.profiles(), owner.playerUuid(), "AERON");
+            assertEquals(1, repository.suggestTargets("aer").size());
+            try (Statement fixture = admin.createStatement()) {
+                fixture.executeUpdate("""
+                        INSERT INTO players (uuid, username, first_seen_at, last_seen_at)
+                        SELECT gen_random_uuid(), 'Many_' || sequence, now(), now()
+                        FROM generate_series(1, 100) AS sequence
+                        """);
+            }
+            assertEquals(64, repository.suggestTargets("Many_").size());
+            assertEquals(repository.suggestTargets("Many_"), repository.suggestTargets("many_"));
+        }
+    }
+
+    @Test
     void nicknameChangesClearsAndReuseReplaceOnlyTheCurrentAlias() throws Exception {
         try (Database database = bootstrap(config(), "classpath:db/migration").initialize();
              var repository = ready(database, "alpha")) {

@@ -93,8 +93,11 @@ matches the player's current stored username or nickname exactly, ignoring ASCII
 Historical usernames, former nicknames, partial names and players who have never joined
 do not resolve. Matching both names of one UUID counts once; matches to different UUIDs
 are ambiguous. Use a canonical UUID when a name is ambiguous. No external identity
-service is queried. Online names are suggested as the target is typed; offline names and
-UUIDs can still be entered directly. `/role set` and `/profile` advertise a player-profile
+service is queried. Completion reads up to 64 distinct current account names/nicknames
+matching the typed prefix, including offline players, on the existing bounded worker.
+Historical reservations are excluded and underscores match literally. Lookup still resolves
+the chosen token; hints confer no identity or authority. UUIDs can be entered directly.
+`/role set`, `/profile`, and `/realname` advertise a player-profile
 target to clients so Bedrock can offer online player names. Command execution still uses
 Omega's persisted lookup; it does not resolve identities through Paper or Mojang.
 Suggestions do not bypass the persisted lookup.
@@ -108,7 +111,7 @@ feedback omits those internal identifiers. ADMIN can assign PLAYER/MODERATOR;
 OWNER can also assign ADMIN. Only local console can change OWNER. RCON, command blocks,
 delegated execution, self-changes and peer/superior targets cannot grant Omega authority.
 `/help` lists commands visible to the sender; `/help <command>` shows that command's
-description and syntax when the sender has access. Help does not repeat the online-player
+description and syntax when the sender has access. Help does not repeat the player-name
 or assignable-role suggestions exposed by tab completion. The registered namespaced paths
 `omegacore:role` and `omegacore:help` share those checks. The old `/omega role set` form has
 been retired. Native management roots are summarized in ADMIN/OWNER help output.
@@ -126,7 +129,7 @@ name opens no dialog. Current names include the
 default Floodgate prefix, such as `.Unreference`; Java and Bedrock identities remain separate
 unless an explicit account-linking feature is added. The same Paper dialog is sent to Java
 and translated by Geyser for Bedrock. `omegacore:profile` is the namespaced path; local
-console and delegated senders cannot open a profile dialog. Online names appear as target
+console and delegated senders cannot open a profile dialog. Stored names appear as target
 suggestions; offline current names, current nicknames and UUIDs remain valid when entered directly.
 The public profile uses text and buttons on both editions. Player heads and portraits
 are outside v0.2; external portrait APIs and self-hosted head images are not planned.
@@ -147,11 +150,30 @@ The shared resolver now accepts current nicknames through the same bounded worke
 database read as account names and UUIDs. Historical account-name reservations and
 Floodgate's unprefixed reservation do not create targeting aliases. Once resolved, a
 mutation retains the UUID even if the nickname changes or is reused. `/role` and `/profile`
-already consume this resolver; their suggestions and help still use account names until
-the commands gate. No additional migration or alias cache is needed.
+consume this resolver and share the bounded stored-name completion path with `/realname`.
+Role confirmations identify a nickname together with its canonical account name, using the
+resolved snapshot and UUID even if the alias changes before the write completes. No
+additional migration or alias cache is needed.
 
-`/nickname`, `/realname`, nickname suggestions, chat/profile presentation, editing dialogs,
-and private notification delivery remain in later gates. The stored notice
+Connected players of every role can use `/nickname` to check their saved nickname,
+`/nickname <name>` to change it, and `/nickname clear` to remove it. Self-edits capture the
+exact joined connection token, read its current revision, and submit through the existing
+profile service. The transaction rejects stale revisions; commands never retry a stale
+edit automatically. A departed or expired connection cannot receive a late reply, while
+an already committed change remains durable. Local console and delegated senders cannot
+edit nicknames. Rejected claims preserve the current nickname and receive specific feedback.
+
+`/realname <player>` is available to connected players and the actual local console. It
+accepts current usernames, nicknames, or canonical UUIDs and shows the account name plus
+the current nickname when present. RCON and delegated execution remain excluded. Both
+commands use the shared catalog for registration, access, namespaced paths, and `/help`.
+
+The command gate passed 337 unit tests, 84 isolated PostgreSQL integration tests, and an
+isolated Paper 26.3 build-135 registration/console-lookup check with clean shutdown. Actual
+Java/Bedrock command use and completion remain the user's acceptance checkpoint.
+
+Chat/profile nickname presentation, editing dialogs, and private notification delivery
+remain in gate 5. The stored notice
 remains pending until a later Paper adapter confirms delivery and queues acknowledgement.
 No extra pool, worker, timer, or external identity API is introduced. The
 [nickname contract](docs/NICKNAMES.md) records the gate boundaries and recovery behavior.

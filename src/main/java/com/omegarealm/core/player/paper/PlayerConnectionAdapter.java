@@ -87,6 +87,20 @@ public final class PlayerConnectionAdapter implements Listener, AutoCloseable {
     }
 
     /**
+     * Capture this exact joined connection for self-service profile operations.
+     * The service rechecks active/committed state and fresh authority when work starts.
+     */
+    public Optional<UUID> profileToken(Player player) {
+        Attempt attempt;
+        synchronized (connections) {
+            attempt = closed ? null : joined.get(player);
+        }
+        return attempt == null || state.get() != RuntimeState.READY
+                || attempt.service.authorization(attempt.attempt.token()).isEmpty()
+                ? Optional.empty() : Optional.of(attempt.attempt.token());
+    }
+
+    /**
      * Schedule a reply using the handle captured on this exact connection's join thread.
      */
     public void reply(Player player, Runnable reply) {

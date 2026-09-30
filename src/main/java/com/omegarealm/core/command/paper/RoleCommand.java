@@ -10,10 +10,10 @@ import com.omegarealm.core.authorization.Role;
 import com.omegarealm.core.authorization.RoleChangeRequest;
 import com.omegarealm.core.authorization.RoleChangeResult;
 import com.omegarealm.core.command.CommandAuditEvent.Outcome;
-import com.omegarealm.core.player.PlayerProfile;
 import com.omegarealm.core.player.PlayerService;
 import com.omegarealm.core.player.PlayerTarget;
 import com.omegarealm.core.player.PlayerTargetResolution;
+import com.omegarealm.core.player.PublicPlayerProfile;
 import com.omegarealm.core.scheduler.OmegaScheduler;
 import io.papermc.paper.command.brigadier.CommandSourceStack;
 import io.papermc.paper.command.brigadier.Commands;
@@ -41,12 +41,12 @@ public final class RoleCommand {
     private final Logger logger;
     private final Runnable schedulingFailure;
     private final BiConsumer<Player, Runnable> playerReply;
-    private final OnlinePlayerTargetSuggestions targetSuggestions;
+    private final PlayerTargetSuggestions targetSuggestions;
 
     RoleCommand(CommandAccess access, Supplier<PlayerService> players, OmegaScheduler scheduler,
                 CommandAudit audit, Logger logger, Runnable schedulingFailure,
                 BiConsumer<Player, Runnable> playerReply,
-                OnlinePlayerTargetSuggestions targetSuggestions) {
+                PlayerTargetSuggestions targetSuggestions) {
         this.access = Objects.requireNonNull(access, "access");
         this.players = Objects.requireNonNull(players, "players");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
@@ -106,7 +106,7 @@ public final class RoleCommand {
             target = PlayerTargetArgument.parse(context);
         } catch (IllegalArgumentException invalid) {
             CommandMessages.send(sender, CommandMessages.Kind.ERROR,
-                    "Enter a current username or full player ID (UUID).");
+                    "Enter a current username, nickname, or full player ID (UUID).");
             record(actor, Outcome.DENIED, operationId, null);
             return 0;
         }
@@ -198,21 +198,21 @@ public final class RoleCommand {
             return;
         }
 
-        PlayerProfile profile = resolution.profile().identity();
-        if (actor instanceof AuthorizationActor.Player player && player.uuid().equals(profile.uuid())) {
+        PublicPlayerProfile profile = resolution.profile();
+        if (actor instanceof AuthorizationActor.Player player && player.uuid().equals(profile.identity().uuid())) {
             record(actor, Outcome.DENIED, operationId, null);
             replyNotice(sender, CommandMessages.Kind.ERROR, "Role not changed",
                     "Use the server console to change your own role.");
             return;
         }
 
-        RoleChangeRequest request = new RoleChangeRequest(actor, profile.uuid(), role, reason, operationId);
+        RoleChangeRequest request = new RoleChangeRequest(actor, profile.identity().uuid(), role, reason, operationId);
         CompletionStage<RoleChangeResult> pending = service.changeRole(request);
         pending.whenComplete((result, mutationFailure) -> finishRoleChange(actor, profile,
                 operationId, sender, result, mutationFailure));
     }
 
-    private void finishRoleChange(AuthorizationActor actor, PlayerProfile profile, UUID operationId,
+    private void finishRoleChange(AuthorizationActor actor, PublicPlayerProfile profile, UUID operationId,
                                   CommandSender sender,
                                   RoleChangeResult result, Throwable failure) {
         if (failure != null) {
@@ -227,13 +227,15 @@ public final class RoleCommand {
             case UNCHANGED -> "No change needed";
             case DENIED, NOT_FOUND -> "Role not changed";
         };
+        String identity = profile.nickname().map(nickname -> nickname + " (account: " + profile.identity().username() + ")")
+                .orElse(profile.identity().username());
         String detail = switch (result.status()) {
-            case CHANGED -> profile.username() + " now has the "
+            case CHANGED -> identity + " now has the "
                     + CommandCatalog.roleName(result.authorization().role()) + " role.";
-            case UNCHANGED -> profile.username() + " already has the "
+            case UNCHANGED -> identity + " already has the "
                     + CommandCatalog.roleName(result.authorization().role()) + " role.";
-            case DENIED -> "You can't manage " + profile.username() + " or assign that role.";
-            case NOT_FOUND -> "We couldn't find " + profile.username() + " when saving the change.";
+            case DENIED -> "You can't manage " + identity + " or assign that role.";
+            case NOT_FOUND -> "We couldn't find " + identity + " when saving the change.";
         };
         CommandMessages.Kind kind = switch (result.status()) {
             case CHANGED -> CommandMessages.Kind.SUCCESS;

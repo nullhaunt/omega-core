@@ -558,6 +558,11 @@ class OmegaRuntimeTest {
 
 
         @Override
+        public java.util.List<String> suggestTargets(String prefix) {
+            return java.util.List.of();
+        }
+
+        @Override
         public PlayerTargetResolution resolveTarget(PlayerTarget target) {
             throw new UnsupportedOperationException();
         }

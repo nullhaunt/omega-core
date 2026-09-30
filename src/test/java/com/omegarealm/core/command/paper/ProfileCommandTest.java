@@ -63,7 +63,7 @@ class ProfileCommandTest {
         Harness harness = new Harness();
         assertEquals(0, harness.dispatcher.execute("profile name%", harness.playerSource()));
         assertTrue(harness.requests.isEmpty());
-        assertTrue(harness.messages.getLast().contains("current username or full player ID"));
+        assertTrue(harness.messages.getLast().contains("current username, nickname, or full player ID"));
 
         PlayerTarget missing = new PlayerTarget.ByName("Unknown");
         assertEquals(1, harness.dispatcher.execute("profile Unknown", harness.playerSource()));
@@ -173,7 +173,11 @@ class ProfileCommandTest {
                     (player, profile) -> presented.add(profile), Logger.getAnonymousLogger(),
                     () -> {
                         throw new AssertionError("Scheduling must remain available");
-                    }, new OnlinePlayerTargetSuggestions(access, () -> onlinePlayers));
+                    }, new PlayerTargetSuggestions(access, prefix -> CompletableFuture.completedFuture(
+                    onlinePlayers.stream()
+                            .map(Player::getName)
+                            .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(prefix.toLowerCase(Locale.ROOT)))
+                            .toList())));
             dispatcher.getRoot().addChild(command.node(StringArgumentType.greedyString()));
         }
 

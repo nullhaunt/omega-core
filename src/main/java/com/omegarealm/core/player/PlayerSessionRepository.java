@@ -51,6 +51,12 @@ public interface PlayerSessionRepository extends AutoCloseable {
      */
     PlayerTargetResolution resolveTarget(PlayerTarget target) throws PersistenceException;
 
+    /**
+     * At most 64 distinct current username/nickname prefix matches, including offline players.
+     * Suggestions confer no identity or authority; execution must resolve the selected token.
+     */
+    List<String> suggestTargets(String prefix) throws PersistenceException;
+
     Optional<PlayerSession> findSession(UUID sessionId) throws PersistenceException;
 
     PlayerProfile join(SessionStart start) throws PersistenceException;
