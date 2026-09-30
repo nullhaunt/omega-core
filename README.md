@@ -125,8 +125,26 @@ unless an explicit account-linking feature is added. The same Paper dialog is se
 and translated by Geyser for Bedrock. `omegacore:profile` is the namespaced path; local
 console and delegated senders cannot open a profile dialog. Online names appear as target
 suggestions; offline current names and UUIDs remain valid when entered directly.
-Player heads are a later crossplay gate: Geyser's current dialog translation omits item
-bodies, so this build does not show a Java-only portrait.
+The public profile uses text and buttons on both editions. Player heads and portraits
+are outside v0.2; external portrait APIs and self-hosted head images are not planned.
+
+The nickname persistence gate adds `V008` and a focused `PlayerProfileRepository` view
+of the existing session owner's connection. UUID-based nickname reads, revision-checked
+self-edits, pending conflict notices, and owner-specific notice acknowledgement run on
+the existing bounded player worker. Nicknames accept 3-16 ASCII letters, digits, and
+underscores; PostgreSQL enforces case-insensitive uniqueness. Account-name reservations
+retain recorded username history and protect both Floodgate's `.Name` and `Name` spelling.
+A successful account join clears another player's conflicting nickname and commits its
+audit and pending notice with the session. A changed or cleared nickname is reusable
+unless an account reservation also protects it. Claims and account reservations share
+a transaction-scoped database lock across server IDs, with the existing query bounds.
+Existing migration files remain unchanged; `V008` seeds only currently recorded names.
+
+This is the persistence gate only: commands, nickname target resolution, chat/display
+caches, dialogs, and private notification delivery are not wired yet. The stored notice
+remains pending until a later Paper adapter confirms delivery and queues acknowledgement.
+No extra pool, worker, timer, or external identity API is introduced. The
+[nickname contract](docs/NICKNAMES.md) records the gate boundaries and recovery behavior.
 
 Omega handles public player chat through a server-owned delivery path. It cancels Paper's
 normal signed broadcast and sends a fresh Adventure component to the viewers retained by

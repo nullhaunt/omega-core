@@ -33,6 +33,37 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
     private final String serverId;
     private final int serverKey;
     private final Thread ownerThread;
+    private final PostgresNicknameStore nicknames;
+    private final PlayerProfileRepository profiles = new PlayerProfileRepository() {
+        @Override
+        public Optional<PlayerNickname> loadNickname(UUID playerUuid) throws PersistenceException {
+            Objects.requireNonNull(playerUuid, "playerUuid");
+            requireRecovered();
+            return transaction("nickname load", () -> nicknames.load(playerUuid));
+        }
+
+        @Override
+        public NicknameChangeResult changeNickname(NicknameChange change) throws PersistenceException {
+            Objects.requireNonNull(change, "change");
+            requireRecovered();
+            return transaction("nickname change", () -> nicknames.change(change));
+        }
+
+        @Override
+        public List<NicknameNotice> pendingNicknameNotices(UUID playerUuid) throws PersistenceException {
+            Objects.requireNonNull(playerUuid, "playerUuid");
+            requireRecovered();
+            return transaction("nickname notices", () -> nicknames.notices(playerUuid));
+        }
+
+        @Override
+        public boolean acknowledgeNicknameNotice(UUID playerUuid, UUID noticeId) throws PersistenceException {
+            Objects.requireNonNull(playerUuid, "playerUuid");
+            Objects.requireNonNull(noticeId, "noticeId");
+            requireRecovered();
+            return transaction("nickname notice acknowledgement", () -> nicknames.acknowledge(playerUuid, noticeId));
+        }
+    };
     private boolean usable = true;
     private boolean closed;
     private boolean recoveryComplete;
@@ -44,6 +75,7 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
         this.serverId = serverId;
         this.serverKey = serverKey;
         ownerThread = Thread.currentThread();
+        nicknames = new PostgresNicknameStore(connection, serverId);
     }
 
     /**
@@ -120,7 +152,7 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
         }
     }
 
-    private static PreparedStatement prepare(Connection connection, String sql) throws SQLException {
+    static PreparedStatement prepare(Connection connection, String sql) throws SQLException {
         PreparedStatement statement = connection.prepareStatement(sql);
         try {
             statement.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
@@ -154,6 +186,11 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
             throw new IllegalStateException("Existing player authorization is missing.");
         }
         return Role.valueOf(role);
+    }
+
+    @Override
+    public PlayerProfileRepository profiles() {
+        return profiles;
     }
 
     @Override
@@ -377,6 +414,9 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
                 return player;
             }
 
+            // Claims and account-name priority share this transaction across server owners.
+            // Acquire before player/auth rows so every name writer has the same lock order.
+            nicknames.lockNames();
             initializeNewPlayer(start);
 
             PlayerProfile player;
@@ -410,6 +450,7 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
                 timestamp(statement, 4, start.joinedAt());
                 statement.executeUpdate();
             }
+            nicknames.reserveAccount(start.playerUuid(), start.username());
             return player;
         });
     }
@@ -573,6 +614,11 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
         }
 
         if (inserted) {
+            try (PreparedStatement statement = prepare(connection,
+                    "INSERT INTO player_nicknames (player_uuid) VALUES (?)")) {
+                statement.setObject(1, start.playerUuid());
+                statement.executeUpdate();
+            }
             try (PreparedStatement statement = prepare(connection, """
                     INSERT INTO player_authorizations (player_uuid, role, revision)
                     VALUES (?, 'PLAYER', 0)

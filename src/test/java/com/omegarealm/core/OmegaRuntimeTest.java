@@ -551,6 +551,11 @@ class OmegaRuntimeTest {
     }
 
     private static class TestRepository implements PlayerSessionRepository {
+        @Override
+        public PlayerProfileRepository profiles() {
+            return new StubPlayerProfileRepository();
+        }
+
 
         @Override
         public PlayerTargetResolution resolveTarget(PlayerTarget target) {

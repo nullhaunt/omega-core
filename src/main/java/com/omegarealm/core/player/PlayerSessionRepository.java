@@ -18,6 +18,11 @@ import java.util.UUID;
 public interface PlayerSessionRepository extends AutoCloseable {
 
     /**
+     * Focused profile view sharing this owner's connection, transactions, and lifetime.
+     */
+    PlayerProfileRepository profiles();
+
+    /**
      * Loads profile and authorization consistently; does not create either record.
      */
     LoadedPlayer loadPlayer(UUID playerUuid) throws PersistenceException;

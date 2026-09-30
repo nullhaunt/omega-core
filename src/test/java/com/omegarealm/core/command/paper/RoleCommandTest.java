@@ -491,6 +491,11 @@ class RoleCommandTest {
         private boolean ambiguousTarget;
 
         @Override
+        public PlayerProfileRepository profiles() {
+            return new StubPlayerProfileRepository();
+        }
+
+        @Override
         public PlayerTargetResolution resolveTarget(PlayerTarget target) {
             if (ambiguousTarget && target instanceof PlayerTarget.ByUsername) {
                 return PlayerTargetResolution.ambiguous();

@@ -591,7 +591,7 @@ class PlayerSessionRepositoryIntegrationTest {
             assertEquals(JOINED, loaded.storedProfile().orElseThrow().firstSeenAt());
             assertEquals(JOINED, loaded.storedProfile().orElseThrow().lastSeenAt());
             assertEquals(0, scalar(admin, "SELECT count(*) FROM player_sessions"));
-            assertEquals(7, scalar(admin, "SELECT count(*) FROM flyway_schema_history WHERE success"));
+            assertEquals(8, scalar(admin, "SELECT count(*) FROM flyway_schema_history WHERE success"));
         }
     }
 

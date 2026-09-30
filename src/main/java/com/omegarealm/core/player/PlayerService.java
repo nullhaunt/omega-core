@@ -28,6 +28,7 @@ public final class PlayerService implements PlayerTargetResolver {
 
     private final Object ownership = new Object();
     private final PlayerSessionRepository repository;
+    private final PlayerProfileRepository profiles;
     private final Executor worker;
     private final ScheduledExecutorService deadlines;
     private final Consumer<String> criticalFailure;
@@ -43,6 +44,7 @@ public final class PlayerService implements PlayerTargetResolver {
     private final ArrayDeque<CommandAuditEvent> shutdownAudits = new ArrayDeque<>();
     private final Set<RoleMutation> roleChanges = new HashSet<>();
     private final Set<TargetLookup> targetLookups = new HashSet<>();
+    private final Set<ProfileTask<?>> profileOperations = new HashSet<>();
     private State state = State.STARTING;
     private boolean pumpScheduled;
     private Work inFlight;
@@ -87,6 +89,7 @@ public final class PlayerService implements PlayerTargetResolver {
                          Logger logger, Clock time, PlayerServiceLimits limits,
                          AuthorizationRefreshLimits authorizationLimits, boolean debug) {
         this.repository = Objects.requireNonNull(repository, "repository");
+        this.profiles = Objects.requireNonNull(repository.profiles(), "profiles");
         this.worker = Objects.requireNonNull(worker, "worker");
         this.deadlines = Objects.requireNonNull(deadlines, "deadlines");
         this.criticalFailure = Objects.requireNonNull(criticalFailure, "criticalFailure");
@@ -210,6 +213,74 @@ public final class PlayerService implements PlayerTargetResolver {
             Entry entry = attempts.get(token);
             return state == State.RUNNING && entry != null && authorityPhase(entry) && !fresh(entry);
         }
+    }
+
+    /**
+     * Reads profile data for an exact active connection; no display cache is introduced here.
+     */
+    public CompletionStage<Optional<PlayerNickname>> loadNickname(UUID token) {
+        return submitProfile(token, PlayerProfileRepository::loadNickname);
+    }
+
+    /**
+     * Self-service only: the UUID comes from the exact connection, never from client input.
+     */
+    public CompletionStage<NicknameChangeResult> changeNickname(UUID token, long expectedRevision, String nickname) {
+        if (expectedRevision < 0) {
+            throw new IllegalArgumentException("An edit revision is required.");
+        }
+        return submitProfile(token, (profileRepository, uuid) -> profileRepository.changeNickname(
+                new NicknameChange(uuid, expectedRevision, nickname)));
+    }
+
+    public CompletionStage<List<NicknameNotice>> pendingNicknameNotices(UUID token) {
+        return submitProfile(token, PlayerProfileRepository::pendingNicknameNotices);
+    }
+
+    /**
+     * Delivery belongs to a later Paper gate; call only after its private delivery succeeds.
+     */
+    public CompletionStage<Boolean> acknowledgeNicknameNotice(UUID token, UUID noticeId) {
+        Objects.requireNonNull(noticeId, "noticeId");
+        return submitProfile(token, (profileRepository, uuid) ->
+                profileRepository.acknowledgeNicknameNotice(uuid, noticeId));
+    }
+
+    private <T> CompletionStage<T> submitProfile(UUID token, ProfileOperation<T> action) {
+        Objects.requireNonNull(token, "token");
+        ProfileTask<T> task;
+        try {
+            synchronized (ownership) {
+                if (state != State.RUNNING) {
+                    return rejected(Kind.UNAVAILABLE);
+                }
+                Entry entry = attempts.get(token);
+                if (!profileConnection(entry)) {
+                    return rejected(Kind.CANCELLED);
+                }
+                if (mailboxFull()) {
+                    return rejected(Kind.BUSY);
+                }
+                task = new ProfileTask<>(entry, action);
+                task.deadline = deadlines.schedule(() -> failService(
+                                "Player profile operation exceeded its deadline; inspect audit history before retrying.",
+                                () -> profileOperations.contains(task)),
+                        limits.mutationTimeout().toNanos(), TimeUnit.NANOSECONDS);
+                profileOperations.add(task);
+                mailbox.addLast(new Work(null, Operation.PROFILE, null, null, null, task));
+            }
+        } catch (RejectedExecutionException unavailableClock) {
+            failService("Player deadline clock is unavailable.");
+            return rejected(Kind.UNAVAILABLE);
+        }
+        kick();
+        return task.result.minimalCompletionStage();
+    }
+
+    // Called under the state monitor. Old tokens and terminal authority cannot edit a profile.
+    private boolean profileConnection(Entry entry) {
+        return entry != null && attempts.get(entry.attempt.token()) == entry
+                && entry.phase == Phase.ACTIVE && entry.committed && fresh(entry);
     }
 
     public CompletionStage<RoleChangeResult> changeRole(RoleChangeRequest request) {
@@ -463,6 +534,7 @@ public final class PlayerService implements PlayerTargetResolver {
         rejectPending(pending);
         rejectRoleChanges();
         rejectTargetLookups();
+        rejectProfileOperations();
     }
 
     /**
@@ -612,6 +684,7 @@ public final class PlayerService implements PlayerTargetResolver {
                         case ROLE_CHANGE -> changeRoleOnWorker(work.mutation());
                         case COMMAND_AUDIT -> repository.appendCommandAudit(work.commandAudit());
                         case TARGET_LOOKUP -> completion = resolveTargetOnWorker(work.targetLookup());
+                        case PROFILE -> completion = profileOnWorker(work.profileTask());
                     }
                 }
             } catch (PersistenceException failure) {
@@ -891,6 +964,41 @@ public final class PlayerService implements PlayerTargetResolver {
         };
     }
 
+    private <T> Runnable profileOnWorker(ProfileTask<T> task) throws PersistenceException {
+        synchronized (ownership) {
+            if (state != State.RUNNING || !profileConnection(task.entry)) {
+                profileOperations.remove(task);
+                cancel(task.deadline);
+                return () -> task.result.completeExceptionally(new PlayerOperationException(Kind.CANCELLED));
+            }
+        }
+
+        T result = task.action.execute(profiles, task.entry.attempt.identity().uuid());
+        return () -> {
+            boolean publish;
+            synchronized (ownership) {
+                publish = profileOperations.remove(task) && state == State.RUNNING && profileConnection(task.entry);
+                cancel(task.deadline);
+            }
+            if (publish) {
+                task.result.complete(result);
+            } else {
+                task.result.completeExceptionally(new PlayerOperationException(Kind.CANCELLED));
+            }
+        };
+    }
+
+    private void rejectProfileOperations() {
+        List<ProfileTask<?>> pending;
+        synchronized (ownership) {
+            pending = List.copyOf(profileOperations);
+            profileOperations.clear();
+        }
+        for (ProfileTask<?> task : pending) {
+            task.result.completeExceptionally(new PlayerOperationException(Kind.UNAVAILABLE));
+        }
+    }
+
     private void rejectRoleChanges() {
         List<RoleMutation> pending;
         synchronized (ownership) {
@@ -962,6 +1070,7 @@ public final class PlayerService implements PlayerTargetResolver {
             rejectPending(pending);
             rejectRoleChanges();
             rejectTargetLookups();
+            rejectProfileOperations();
         }
     }
 
@@ -981,6 +1090,9 @@ public final class PlayerService implements PlayerTargetResolver {
         }
         for (TargetLookup lookup : targetLookups) {
             cancel(lookup.deadline);
+        }
+        for (ProfileTask<?> task : profileOperations) {
+            cancel(task.deadline);
         }
     }
 
@@ -1008,11 +1120,21 @@ public final class PlayerService implements PlayerTargetResolver {
     }
 
     private enum Operation {
-        LOAD, JOIN, QUIT, ROLE_CHANGE, COMMAND_AUDIT, TARGET_LOOKUP
+        LOAD, JOIN, QUIT, ROLE_CHANGE, COMMAND_AUDIT, TARGET_LOOKUP, PROFILE
+    }
+
+    @FunctionalInterface
+    private interface ProfileOperation<T> {
+        T execute(PlayerProfileRepository repository, UUID playerUuid) throws PersistenceException;
     }
 
     private record Work(Entry entry, Operation operation, RoleMutation mutation,
-                        CommandAuditEvent commandAudit, TargetLookup targetLookup) {
+                        CommandAuditEvent commandAudit, TargetLookup targetLookup, ProfileTask<?> profileTask) {
+        private Work(Entry entry, Operation operation, RoleMutation mutation,
+                     CommandAuditEvent commandAudit, TargetLookup targetLookup) {
+            this(entry, operation, mutation, commandAudit, targetLookup, null);
+        }
+
         private Work(Entry entry, Operation operation) {
             this(entry, operation, null, null, null);
         }
@@ -1033,6 +1155,18 @@ public final class PlayerService implements PlayerTargetResolver {
 
         private TargetLookup(PlayerTarget target) {
             this.target = target;
+        }
+    }
+
+    private static final class ProfileTask<T> {
+        private final Entry entry;
+        private final ProfileOperation<T> action;
+        private final CompletableFuture<T> result = new CompletableFuture<>();
+        private ScheduledFuture<?> deadline;
+
+        private ProfileTask(Entry entry, ProfileOperation<T> action) {
+            this.entry = entry;
+            this.action = action;
         }
     }
 

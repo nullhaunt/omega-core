@@ -1101,6 +1101,168 @@ class PlayerServiceTest {
         }
     }
 
+    @Test
+    void nicknameEditsUseTheConnectionUuidAndTheExistingBoundedWorker() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        PlayerServiceLimits bounded = limits(1, 256, Duration.ofSeconds(3), Duration.ofSeconds(3),
+                Duration.ofSeconds(3), Duration.ofSeconds(30), Duration.ofSeconds(3));
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (Harness harness = new Harness(repository, bounded)) {
+            PlayerAttempt player = attempt();
+            await(harness.service.prepare(player));
+            await(harness.service.activate(player.token(), JOINED));
+            harness.worker.execute(() -> {
+                entered.countDown();
+                waitFor(release);
+            });
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            CompletionStage<NicknameChangeResult> pending = harness.service.changeNickname(player.token(), 0, "Aeron");
+            assertFalse(pending.toCompletableFuture().isDone());
+            assertTrue(repository.nicknameChanges.isEmpty());
+            assertFailure(BUSY, harness.service.loadNickname(player.token()));
+            release.countDown();
+            assertEquals("Aeron", await(pending).current().nickname());
+            assertEquals(List.of(new NicknameChange(player.identity().uuid(), 0, "Aeron")), repository.nicknameChanges);
+            assertTrue(harness.failures.isEmpty());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void nicknameChangesRejectPreparedAndDisconnectedTokensWithoutWrites() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            PlayerAttempt player = attempt();
+            await(harness.service.prepare(player));
+            assertFailure(CANCELLED, harness.service.changeNickname(player.token(), 0, "Aeron"));
+            await(harness.service.activate(player.token(), JOINED));
+            harness.worker.execute(() -> {
+                entered.countDown();
+                waitFor(release);
+            });
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            CompletionStage<NicknameChangeResult> pending = harness.service.changeNickname(player.token(), 0, "Aeron");
+            CompletionStage<Void> quit = harness.service.disconnect(player.token(), JOINED.plusSeconds(1));
+            release.countDown();
+            assertFailure(CANCELLED, pending);
+            await(quit);
+            PlayerAttempt reconnect = new PlayerAttempt(UUID.randomUUID(), player.identity());
+            await(harness.service.prepare(reconnect));
+            await(harness.service.activate(reconnect.token(), JOINED.plusSeconds(2)));
+            assertFailure(CANCELLED, harness.service.changeNickname(player.token(), 0, "Aeron"));
+            assertEquals(reconnect.identity().uuid(), await(harness.service.loadNickname(reconnect.token())).orElseThrow().playerUuid());
+            assertTrue(repository.nicknameChanges.isEmpty());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void stopRejectsQueuedNicknameChangesBeforeTheyReachTheRepository() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            PlayerAttempt player = attempt();
+            await(harness.service.prepare(player));
+            await(harness.service.activate(player.token(), JOINED));
+            harness.worker.execute(() -> {
+                entered.countDown();
+                waitFor(release);
+            });
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            CompletionStage<NicknameChangeResult> pending = harness.service.changeNickname(player.token(), 0, "Aeron");
+            harness.service.requestStop(JOINED.plusSeconds(1));
+            assertFailure(UNAVAILABLE, pending);
+            assertFailure(UNAVAILABLE, harness.service.changeNickname(player.token(), 0, "Comet"));
+            release.countDown();
+        } finally {
+            release.countDown();
+        }
+        assertTrue(repository.nicknameChanges.isEmpty());
+    }
+
+    @Test
+    void stopWinsOverALateNicknameCommitWithoutUndoingTheDurableWrite() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        repository.nicknameMutation = change -> {
+            entered.countDown();
+            waitFor(release);
+            return new NicknameChangeResult(NicknameChangeResult.Status.CHANGED,
+                    new PlayerNickname(change.playerUuid(), change.nickname(), change.expectedRevision() + 1));
+        };
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            PlayerAttempt player = attempt();
+            await(harness.service.prepare(player));
+            await(harness.service.activate(player.token(), JOINED));
+            CompletionStage<NicknameChangeResult> pending = harness.service.changeNickname(player.token(), 0, "Aeron");
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            harness.service.requestStop(JOINED.plusSeconds(1));
+            assertFailure(UNAVAILABLE, pending);
+            release.countDown();
+            harness.barrier();
+            assertFailure(UNAVAILABLE, pending);
+            assertEquals(1, repository.nicknameChanges.size());
+            assertTrue(harness.failures.isEmpty());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void nicknameDeadlineFailsClosedAndCannotPublishLateSuccess() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        repository.nicknameMutation = change -> {
+            entered.countDown();
+            waitFor(release);
+            return new NicknameChangeResult(NicknameChangeResult.Status.CHANGED,
+                    new PlayerNickname(change.playerUuid(), change.nickname(), 1));
+        };
+        PlayerServiceLimits bounded = limits(64, 256, Duration.ofSeconds(3), Duration.ofSeconds(3),
+                Duration.ofMillis(150), Duration.ofSeconds(30), Duration.ofSeconds(3));
+        try (Harness harness = new Harness(repository, bounded)) {
+            PlayerAttempt player = attempt();
+            await(harness.service.prepare(player));
+            await(harness.service.activate(player.token(), JOINED));
+            CompletionStage<NicknameChangeResult> pending = harness.service.changeNickname(player.token(), 0, "Aeron");
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            assertFailure(UNAVAILABLE, pending);
+            assertFalse(harness.service.isRunning());
+            assertEquals(1, harness.failures.size());
+            release.countDown();
+            harness.barrier();
+            assertFailure(UNAVAILABLE, pending);
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void profileFailureClosesAdmissionAndNoticeAcknowledgementUsesTheOwnerUuid() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        try (Harness harness = new Harness(repository, LIMITS)) {
+            PlayerAttempt player = attempt();
+            await(harness.service.prepare(player));
+            await(harness.service.activate(player.token(), JOINED));
+            assertTrue(await(harness.service.pendingNicknameNotices(player.token())).isEmpty());
+            UUID notice = UUID.randomUUID();
+            assertFalse(await(harness.service.acknowledgeNicknameNotice(player.token(), notice)));
+            assertEquals(List.of(player.identity().uuid()), repository.noticeOwners);
+            repository.failNickname = true;
+            assertFailure(UNAVAILABLE, harness.service.changeNickname(player.token(), 0, "Aeron"));
+            assertFalse(harness.service.isRunning());
+            assertEquals(1, harness.failures.size());
+        }
+    }
+
     private static final class Harness implements AutoCloseable {
         private final ExecutorService worker = Executors.newSingleThreadExecutor();
         private final CapturingClock clock = new CapturingClock();
@@ -1163,12 +1325,18 @@ class PlayerServiceTest {
     }
 
     private static final class FakeRepository implements PlayerSessionRepository {
+        private final List<NicknameChange> nicknameChanges = new CopyOnWriteArrayList<>();
+        private final List<UUID> noticeOwners = new CopyOnWriteArrayList<>();
         private final AtomicInteger recoveries = new AtomicInteger();
         private final AtomicInteger reads = new AtomicInteger();
         private final List<String> events = new CopyOnWriteArrayList<>();
         private final List<SessionStart> joins = new CopyOnWriteArrayList<>();
         private final List<End> ends = new CopyOnWriteArrayList<>();
         private final List<CommandAuditEvent> audits = new CopyOnWriteArrayList<>();
+        private volatile boolean failNickname;
+        private volatile Function<NicknameChange, NicknameChangeResult> nicknameMutation = change ->
+                new NicknameChangeResult(NicknameChangeResult.Status.CHANGED,
+                        new PlayerNickname(change.playerUuid(), change.nickname(), change.expectedRevision() + 1));
         private volatile boolean failAudit;
         private volatile Function<UUID, Optional<PlayerProfile>> read = uuid -> Optional.empty();
         private volatile Function<UUID, AuthorizationSnapshot> authorization = AuthorizationSnapshot::initial;
@@ -1183,6 +1351,42 @@ class PlayerServiceTest {
         private volatile Runnable ownerCheck = () -> {
         };
         private Thread owner;
+
+        @Override
+        public PlayerProfileRepository profiles() {
+            return new StubPlayerProfileRepository() {
+                @Override
+                public Optional<PlayerNickname> loadNickname(UUID uuid) {
+                    assertOwner();
+                    return Optional.of(new PlayerNickname(uuid, null, 0));
+                }
+
+                @Override
+                public NicknameChangeResult changeNickname(NicknameChange change) throws PersistenceException {
+                    assertOwner();
+                    if (failNickname) {
+                        throw new PersistenceException(PersistenceException.Kind.DATABASE_FAILURE,
+                                "Player persistence nickname change failed.");
+                    }
+                    NicknameChangeResult result = nicknameMutation.apply(change);
+                    nicknameChanges.add(change);
+                    return result;
+                }
+
+                @Override
+                public List<NicknameNotice> pendingNicknameNotices(UUID uuid) {
+                    assertOwner();
+                    return List.of();
+                }
+
+                @Override
+                public boolean acknowledgeNicknameNotice(UUID uuid, UUID id) {
+                    assertOwner();
+                    noticeOwners.add(uuid);
+                    return false;
+                }
+            };
+        }
 
         @Override
         public int recoverInterrupted(Instant at) {

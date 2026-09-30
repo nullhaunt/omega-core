@@ -22,6 +22,23 @@ routine implementation choices within the authorized scope; ask when a missing d
 materially affects behavior or safety. Finish the requested gate without expanding into
 unrequested systems. Creating this file does not authorize the next implementation gate.
 
+## Work together through gates
+
+- Work in small, explicitly agreed gates or chunks, one at a time. A feature plan is
+  not authorization to implement every layer at once. Do not bundle persistence,
+  target resolution, commands, chat, and dialogs into one implementation pass.
+- Before each gate, state its scope, intended behavior, acceptance criteria, and what
+  remains for later gates. Settle material contract decisions before implementation.
+- Finish the gate's appropriate automated checks, then provide a concrete, reviewable
+  result and concise testing instructions. For player-facing changes, stop at that
+  checkpoint so the user can test in-game and offer feedback before proceeding.
+- The user supplies actual in-game acceptance evidence; the agent cannot substitute
+  unit tests, protocol fixtures, or build success for the user's Java/Bedrock experience.
+  State which checks the agent performed and which still need the user's feedback.
+- Incorporate that feedback within the current gate before agreeing on the next scope.
+  Do not automatically advance to the next gate or ask the user to repeat checks they
+  have already confirmed. Documentation-only gates need review, not an in-game test.
+
 ## Project shape
 
 - Target Java 25 and Paper 26.3. Use the Gradle wrapper and Kotlin build script.
