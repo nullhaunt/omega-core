@@ -46,8 +46,8 @@ public interface PlayerSessionRepository extends AutoCloseable {
     Optional<PlayerProfile> findPlayer(UUID playerUuid) throws PersistenceException;
 
     /**
-     * Resolves a persisted UUID or current stored username. Two username matches are
-     * enough to reject ambiguity without returning a large result set.
+     * Resolves a persisted UUID, current username, or current nickname. Two distinct
+     * UUIDs are enough to reject ambiguity; matching both names of one UUID is one result.
      */
     PlayerTargetResolution resolveTarget(PlayerTarget target) throws PersistenceException;
 

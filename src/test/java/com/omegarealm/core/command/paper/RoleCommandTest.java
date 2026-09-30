@@ -497,12 +497,12 @@ class RoleCommandTest {
 
         @Override
         public PlayerTargetResolution resolveTarget(PlayerTarget target) {
-            if (ambiguousTarget && target instanceof PlayerTarget.ByUsername) {
+            if (ambiguousTarget && target instanceof PlayerTarget.ByName) {
                 return PlayerTargetResolution.ambiguous();
             }
             if (targetProfile != null && (target instanceof PlayerTarget.ByUuid(UUID uuid1)
                     && targetProfile.uuid().equals(uuid1)
-                    || target instanceof PlayerTarget.ByUsername(String username)
+                    || target instanceof PlayerTarget.ByName(String username)
                     && targetProfile.username().equalsIgnoreCase(username))) {
                 return PlayerTargetResolution.found(new PublicPlayerProfile(targetProfile, Role.PLAYER));
             }

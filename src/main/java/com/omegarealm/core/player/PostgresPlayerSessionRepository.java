@@ -178,7 +178,14 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
     }
 
     private static PublicPlayerProfile publicProfile(ResultSet result) throws SQLException {
-        return new PublicPlayerProfile(profile(result), storedRole(result.getString("role")));
+        PlayerProfile identity = profile(result);
+        long nicknameRevision = result.getLong("nickname_revision");
+        if (result.wasNull()) {
+            throw new IllegalStateException("Existing player nickname state is missing.");
+        }
+        PlayerNickname nickname = new PlayerNickname(identity.uuid(), result.getString("nickname"), nicknameRevision);
+        return new PublicPlayerProfile(identity, storedRole(result.getString("role")),
+                Optional.ofNullable(nickname.nickname()));
     }
 
     private static Role storedRole(String role) {
@@ -383,7 +390,7 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
         return transaction("player target lookup", () -> switch (target) {
             case PlayerTarget.ByUuid uuid -> selectPublicPlayer(uuid.uuid())
                     .map(PlayerTargetResolution::found).orElseGet(PlayerTargetResolution::missing);
-            case PlayerTarget.ByUsername name -> selectByUsername(name.username());
+            case PlayerTarget.ByName name -> selectByName(name.name());
         });
     }
 
@@ -542,8 +549,10 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
 
     private Optional<PublicPlayerProfile> selectPublicPlayer(UUID playerUuid) throws SQLException {
         try (PreparedStatement statement = prepare(connection, """
-                SELECT p.uuid, p.username, p.first_seen_at, p.last_seen_at, a.role
+                SELECT p.uuid, p.username, p.first_seen_at, p.last_seen_at, a.role,
+                       n.nickname, n.revision AS nickname_revision
                 FROM players p LEFT JOIN player_authorizations a ON a.player_uuid = p.uuid
+                LEFT JOIN player_nicknames n ON n.player_uuid = p.uuid
                 WHERE p.uuid = ?
                 """)) {
             statement.setObject(1, playerUuid);
@@ -553,23 +562,35 @@ public final class PostgresPlayerSessionRepository implements PlayerSessionRepos
         }
     }
 
-    private PlayerTargetResolution selectByUsername(String username) throws SQLException {
+    private PlayerTargetResolution selectByName(String name) throws SQLException {
+        // Read both alias sources and the full public profile in one statement snapshot.
+        // UNION deduplicates a player's two matching names before the ambiguity bound.
         try (PreparedStatement statement = prepare(connection, """
-                SELECT p.uuid, p.username, p.first_seen_at, p.last_seen_at, a.role
-                FROM players p LEFT JOIN player_authorizations a ON a.player_uuid = p.uuid
-                WHERE lower(p.username) = lower(?)
+                WITH matches AS (
+                    (SELECT uuid FROM players WHERE lower(username) = lower(?) ORDER BY uuid LIMIT 2)
+                    UNION
+                    (SELECT player_uuid AS uuid FROM player_nicknames
+                     WHERE lower(nickname COLLATE "C") = ? ORDER BY player_uuid LIMIT 2)
+                ), targets AS (
+                    SELECT uuid FROM matches ORDER BY uuid LIMIT 2
+                )
+                SELECT p.uuid, p.username, p.first_seen_at, p.last_seen_at, a.role,
+                       n.nickname, n.revision AS nickname_revision, count(*) OVER () AS matched_players
+                FROM targets t JOIN players p ON p.uuid = t.uuid
+                LEFT JOIN player_authorizations a ON a.player_uuid = p.uuid
+                LEFT JOIN player_nicknames n ON n.player_uuid = p.uuid
                 ORDER BY p.uuid
-                LIMIT 2
                 """)) {
-            statement.setString(1, username);
+            statement.setString(1, name);
+            statement.setString(2, NicknamePolicy.key(name));
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
                     return PlayerTargetResolution.missing();
                 }
-                PlayerProfile first = profile(rows);
-                String role = rows.getString("role");
-                return rows.next() ? PlayerTargetResolution.ambiguous()
-                        : PlayerTargetResolution.found(new PublicPlayerProfile(first, storedRole(role)));
+                if (rows.getInt("matched_players") > 1) {
+                    return PlayerTargetResolution.ambiguous();
+                }
+                return PlayerTargetResolution.found(publicProfile(rows));
             }
         }
     }

@@ -6,13 +6,22 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Public identity composed with the current stored role at lookup time.
+ * Immutable public projection composed from one stored identity/role/nickname snapshot.
+ * Editing revisions remain in the focused profile boundary, not this public view.
  */
-public record PublicPlayerProfile(PlayerProfile identity, Role role) {
+public record PublicPlayerProfile(PlayerProfile identity, Role role, Optional<String> nickname) {
 
     public PublicPlayerProfile {
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(role, "role");
+        Objects.requireNonNull(nickname, "nickname");
+        if (nickname.isPresent() && (!NicknamePolicy.valid(nickname.get()) || NicknamePolicy.reserved(nickname.get()))) {
+            throw new IllegalArgumentException("Invalid public nickname.");
+        }
+    }
+
+    public PublicPlayerProfile(PlayerProfile identity, Role role) {
+        this(identity, role, Optional.empty());
     }
 
     public Optional<String> staffDesignation() {

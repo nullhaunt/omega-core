@@ -949,13 +949,13 @@ public final class PlayerService implements PlayerTargetResolver {
 
     private Runnable resolveTargetOnWorker(TargetLookup lookup) throws PersistenceException {
         PlayerTargetResolution resolution = repository.resolveTarget(lookup.target);
-        boolean publish;
-        synchronized (ownership) {
-            publish = state == State.RUNNING;
-            targetLookups.remove(lookup);
-            cancel(lookup.deadline);
-        }
         return () -> {
+            boolean publish;
+            synchronized (ownership) {
+                // Keep the read registered until publication so stop/deadline can still win.
+                publish = targetLookups.remove(lookup) && state == State.RUNNING;
+                cancel(lookup.deadline);
+            }
             if (publish) {
                 lookup.result.complete(resolution);
             } else {

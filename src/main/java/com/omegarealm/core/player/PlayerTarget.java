@@ -4,9 +4,10 @@ import java.util.Objects;
 import java.util.UUID;
 
 /**
- * A command-facing reference. Resolution always returns a persisted UUID and current name.
+ * A command-facing UUID or name token. A name may be a current username or nickname;
+ * it becomes an authoritative identity only after persisted resolution.
  */
-public sealed interface PlayerTarget permits PlayerTarget.ByUuid, PlayerTarget.ByUsername {
+public sealed interface PlayerTarget permits PlayerTarget.ByUuid, PlayerTarget.ByName {
 
     static PlayerTarget parse(String input) {
         Objects.requireNonNull(input, "input");
@@ -17,10 +18,10 @@ public sealed interface PlayerTarget permits PlayerTarget.ByUuid, PlayerTarget.B
                     return new ByUuid(uuid);
                 }
             } catch (IllegalArgumentException invalidUuid) {
-                // An invalid UUID-shaped token is rejected by the username rule below.
+                // An invalid UUID-shaped token is rejected by the name rule below.
             }
         }
-        return new ByUsername(input);
+        return new ByName(input);
     }
 
     record ByUuid(UUID uuid) implements PlayerTarget {
@@ -29,13 +30,15 @@ public sealed interface PlayerTarget permits PlayerTarget.ByUuid, PlayerTarget.B
         }
     }
 
-    record ByUsername(String username) implements PlayerTarget {
-        public ByUsername {
-            Objects.requireNonNull(username, "username");
+    record ByName(String name) implements PlayerTarget {
+        public ByName {
+            Objects.requireNonNull(name, "name");
             // Floodgate's default prefix is part of the stored username, including for
             // players whose Bedrock gamertag matches a separate Java account.
-            if (!username.matches("(?:[A-Za-z0-9_]{1,16}|\\.[A-Za-z0-9_]{1,15})")) {
-                throw new IllegalArgumentException("Use a canonical UUID or a current stored username.");
+            // Nicknames share the unprefixed alphabet. Short account names remain valid
+            // targets even though a nickname requires at least three characters.
+            if (!name.matches("(?:[A-Za-z0-9_]{1,16}|\\.[A-Za-z0-9_]{1,15})")) {
+                throw new IllegalArgumentException("Use a canonical UUID, current username, or nickname.");
             }
         }
     }

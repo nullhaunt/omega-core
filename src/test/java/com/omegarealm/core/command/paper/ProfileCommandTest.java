@@ -41,7 +41,7 @@ class ProfileCommandTest {
         harness.replies.remove().run();
         assertEquals(List.of(publicProfile), harness.presented);
 
-        PlayerTarget bedrock = new PlayerTarget.ByUsername(".Unreference");
+        PlayerTarget bedrock = new PlayerTarget.ByName(".Unreference");
         assertEquals(1, harness.dispatcher.execute("profile .Unreference", harness.playerSource()));
         assertEquals(List.of(self, bedrock), harness.requests);
         harness.complete(bedrock, PlayerTargetResolution.found(publicProfile));
@@ -65,13 +65,13 @@ class ProfileCommandTest {
         assertTrue(harness.requests.isEmpty());
         assertTrue(harness.messages.getLast().contains("current username or full player ID"));
 
-        PlayerTarget missing = new PlayerTarget.ByUsername("Unknown");
+        PlayerTarget missing = new PlayerTarget.ByName("Unknown");
         assertEquals(1, harness.dispatcher.execute("profile Unknown", harness.playerSource()));
         harness.complete(missing, PlayerTargetResolution.missing());
         harness.replies.remove().run();
         assertTrue(harness.messages.getLast().contains("couldn't find a saved profile"));
 
-        PlayerTarget ambiguous = new PlayerTarget.ByUsername("Duplicated");
+        PlayerTarget ambiguous = new PlayerTarget.ByName("Duplicated");
         assertEquals(1, harness.dispatcher.execute("profile Duplicated", harness.playerSource()));
         harness.complete(ambiguous, PlayerTargetResolution.ambiguous());
         harness.replies.remove().run();
@@ -93,7 +93,7 @@ class ProfileCommandTest {
     @Test
     void failedLookupReportsAnErrorWithoutOpeningADialog() throws Exception {
         Harness harness = new Harness();
-        PlayerTarget target = new PlayerTarget.ByUsername("Unknown");
+        PlayerTarget target = new PlayerTarget.ByName("Unknown");
 
         assertEquals(1, harness.dispatcher.execute("profile Unknown", harness.playerSource()));
         harness.lookups.get(target).completeExceptionally(new IllegalStateException("database unavailable"));

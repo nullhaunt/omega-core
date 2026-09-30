@@ -3,7 +3,7 @@ package com.omegarealm.core.player;
 import java.util.Objects;
 
 /**
- * A bounded lookup never guesses between UUIDs sharing the same stored username.
+ * A bounded lookup never guesses between UUIDs sharing a matching current name.
  */
 public record PlayerTargetResolution(Status status, PublicPlayerProfile profile) {
 

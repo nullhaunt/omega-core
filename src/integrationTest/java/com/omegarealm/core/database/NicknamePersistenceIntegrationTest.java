@@ -1,5 +1,9 @@
 package com.omegarealm.core.database;
 
+import com.omegarealm.core.authorization.AuthorizationActor;
+import com.omegarealm.core.authorization.Role;
+import com.omegarealm.core.authorization.RoleChangeRequest;
+import com.omegarealm.core.authorization.RoleChangeResult;
 import com.omegarealm.core.config.DatabaseConfig;
 import com.omegarealm.core.player.*;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
@@ -8,6 +12,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -91,6 +97,204 @@ class NicknamePersistenceIntegrationTest {
             ready.countDown();
             assertTrue(release.await(5, TimeUnit.SECONDS));
             return set(repository.profiles(), uuid, name);
+        }
+    }
+
+    @Test
+    void offlineNicknameUsernameAndUuidReturnTheSameStoredSnapshotWithoutWrites() throws Exception {
+        try (Database database = bootstrap(config(), "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha"); Connection admin = database.openConnection()) {
+            SessionStart owner = player("AccountName");
+            repository.join(owner);
+            set(repository.profiles(), owner.playerUuid(), "Aeron_1");
+            repository.endSession(owner.sessionId(), JOINED.plusSeconds(1), SessionEnd.QUIT);
+            assertEquals(RoleChangeResult.Status.CHANGED, repository.changeRole(new RoleChangeRequest(
+                    new AuthorizationActor.LocalConsole(), owner.playerUuid(), Role.MODERATOR, "Staff appointment")).status());
+            long commandAuditsBeforeLookup = count(admin, "SELECT count(*) FROM command_audit");
+
+            PublicPlayerProfile expected = repository.resolveTarget(new PlayerTarget.ByUuid(owner.playerUuid())).profile();
+            assertEquals(owner.playerUuid(), expected.identity().uuid());
+            assertEquals("AccountName", expected.identity().username());
+            assertEquals("Aeron_1", expected.nickname().orElseThrow());
+            assertEquals(Role.MODERATOR, expected.role());
+            for (String name : List.of("aCcOuNtNaMe", "aERON_1")) {
+                assertEquals(PlayerTargetResolution.found(expected), repository.resolveTarget(new PlayerTarget.ByName(name)));
+            }
+            assertEquals(PlayerTargetResolution.missing(), repository.resolveTarget(new PlayerTarget.ByName("Aeron")));
+            assertEquals(PlayerTargetResolution.missing(), repository.resolveTarget(new PlayerTarget.ByUuid(UUID.randomUUID())));
+            assertEquals(1, count(admin, "SELECT count(*) FROM player_nickname_audit"));
+            assertEquals(1, count(admin, "SELECT count(*) FROM role_change_audit"));
+            assertEquals(commandAuditsBeforeLookup, count(admin, "SELECT count(*) FROM command_audit"));
+        }
+    }
+
+    @Test
+    void nicknameChangesClearsAndReuseReplaceOnlyTheCurrentAlias() throws Exception {
+        try (Database database = bootstrap(config(), "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha")) {
+            SessionStart first = player("First");
+            SessionStart second = player("Second");
+            repository.join(first);
+            repository.join(second);
+            set(repository.profiles(), first.playerUuid(), "Aeron");
+            PublicPlayerProfile before = repository.resolveTarget(new PlayerTarget.ByName("aeron")).profile();
+
+            set(repository.profiles(), first.playerUuid(), "Comet");
+            assertEquals(PlayerTargetResolution.missing(), repository.resolveTarget(new PlayerTarget.ByName("Aeron")));
+            assertEquals(first.playerUuid(), repository.resolveTarget(new PlayerTarget.ByName("COMET")).profile().identity().uuid());
+            set(repository.profiles(), second.playerUuid(), "AERON");
+            assertEquals(second.playerUuid(), repository.resolveTarget(new PlayerTarget.ByName("aeron")).profile().identity().uuid());
+            set(repository.profiles(), first.playerUuid(), null);
+            assertEquals(PlayerTargetResolution.missing(), repository.resolveTarget(new PlayerTarget.ByName("Comet")));
+            assertTrue(repository.resolveTarget(new PlayerTarget.ByUuid(first.playerUuid())).profile().nickname().isEmpty());
+
+            assertEquals(first.playerUuid(), before.identity().uuid());
+            assertEquals("Aeron", before.nickname().orElseThrow());
+        }
+    }
+
+    @Test
+    void historicalAndUnprefixedFloodgateReservationsAreNotTargetAliases() throws Exception {
+        try (Database database = bootstrap(config(), "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha")) {
+            SessionStart bedrock = player(".Aeron");
+            SessionStart java = player("Other");
+            repository.join(bedrock);
+            repository.join(java);
+            assertEquals(bedrock.playerUuid(), repository.resolveTarget(new PlayerTarget.ByName(".aeron")).profile().identity().uuid());
+            assertEquals(PlayerTargetResolution.missing(), repository.resolveTarget(new PlayerTarget.ByName("Aeron")));
+            assertEquals(RESERVED, set(repository.profiles(), java.playerUuid(), "Aeron").status());
+
+            repository.endSession(bedrock.sessionId(), JOINED.plusSeconds(1), SessionEnd.QUIT);
+            repository.join(new SessionStart(UUID.randomUUID(), bedrock.playerUuid(), ".Renamed", JOINED.plusSeconds(2)));
+            assertEquals(PlayerTargetResolution.missing(), repository.resolveTarget(new PlayerTarget.ByName(".Aeron")));
+            assertEquals(PlayerTargetResolution.missing(), repository.resolveTarget(new PlayerTarget.ByName("Aeron")));
+            assertEquals(RESERVED, set(repository.profiles(), java.playerUuid(), "Aeron").status());
+            assertEquals(CHANGED, set(repository.profiles(), bedrock.playerUuid(), "Renamed").status());
+            assertEquals(bedrock.playerUuid(), repository.resolveTarget(new PlayerTarget.ByName("Renamed")).profile().identity().uuid());
+            assertEquals(".Renamed", repository.resolveTarget(new PlayerTarget.ByName("Renamed")).profile().identity().username());
+            assertEquals(java.playerUuid(), repository.resolveTarget(new PlayerTarget.ByName("Other")).profile().identity().uuid());
+        }
+    }
+
+    @Test
+    void matchingCanonicalNameAndNicknameForOneUuidCountAsOneTarget() throws Exception {
+        try (Database database = bootstrap(config(), "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha")) {
+            SessionStart owner = player("Aeron");
+            repository.join(owner);
+            assertEquals(CHANGED, set(repository.profiles(), owner.playerUuid(), "AERON").status());
+            PlayerTargetResolution resolution = repository.resolveTarget(new PlayerTarget.ByName("aeron"));
+            assertEquals(PlayerTargetResolution.Status.FOUND, resolution.status());
+            assertEquals(owner.playerUuid(), resolution.profile().identity().uuid());
+            assertEquals("AERON", resolution.profile().nickname().orElseThrow());
+        }
+    }
+
+    @Test
+    void conflictingCanonicalAndNicknameMatchesNeverPreferOneUuid() throws Exception {
+        try (Database database = bootstrap(config(), "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha"); Connection admin = database.openConnection()) {
+            SessionStart canonical = player("Aeron");
+            SessionStart alias = player("Other");
+            repository.join(canonical);
+            repository.join(alias);
+            // Simulate inconsistent imported data; ordinary nickname writes reject this claim.
+            try (PreparedStatement fixture = admin.prepareStatement("UPDATE player_nicknames SET nickname = 'aERON' WHERE player_uuid = ?")) {
+                fixture.setObject(1, alias.playerUuid());
+                fixture.executeUpdate();
+            }
+            assertEquals(PlayerTargetResolution.ambiguous(), repository.resolveTarget(new PlayerTarget.ByName("Aeron")));
+            assertEquals(canonical.playerUuid(), repository.resolveTarget(new PlayerTarget.ByUuid(canonical.playerUuid())).profile().identity().uuid());
+            assertEquals(alias.playerUuid(), repository.resolveTarget(new PlayerTarget.ByUuid(alias.playerUuid())).profile().identity().uuid());
+            try (PreparedStatement fixture = admin.prepareStatement("DELETE FROM player_authorizations WHERE player_uuid = ?")) {
+                fixture.setObject(1, canonical.playerUuid());
+                fixture.executeUpdate();
+            }
+            assertEquals(PlayerTargetResolution.ambiguous(), repository.resolveTarget(new PlayerTarget.ByName("Aeron")));
+        }
+    }
+
+    @Test
+    void duplicateNicknameRowsFailAmbiguouslyIfTheUniqueIndexHasBeenRemoved() throws Exception {
+        try (Database database = bootstrap(config(), "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha"); Connection admin = database.openConnection()) {
+            repository.join(player("First"));
+            repository.join(player("Second"));
+            repository.join(player("Third"));
+            try (Statement fixture = admin.createStatement()) {
+                fixture.execute("DROP INDEX player_nickname_key_idx");
+                fixture.executeUpdate("UPDATE player_nicknames SET nickname = 'Aeron'");
+            }
+            assertEquals(PlayerTargetResolution.ambiguous(), repository.resolveTarget(new PlayerTarget.ByName("aeron")));
+        }
+    }
+
+    @Test
+    void resolvedNicknameCannotRedirectARoleWriteAfterAliasReuse() throws Exception {
+        try (Database database = bootstrap(config(), "classpath:db/migration").initialize();
+             var repository = ready(database, "alpha")) {
+            SessionStart original = player("Original");
+            SessionStart replacement = player("Replacement");
+            repository.join(original);
+            repository.join(replacement);
+            set(repository.profiles(), original.playerUuid(), "Aeron");
+            UUID resolved = repository.resolveTarget(new PlayerTarget.ByName("Aeron")).profile().identity().uuid();
+
+            set(repository.profiles(), original.playerUuid(), "Comet");
+            set(repository.profiles(), replacement.playerUuid(), "Aeron");
+            assertEquals(RoleChangeResult.Status.CHANGED, repository.changeRole(new RoleChangeRequest(
+                    new AuthorizationActor.LocalConsole(), resolved, Role.MODERATOR, "Staff appointment")).status());
+
+            assertEquals(Role.MODERATOR, repository.resolveTarget(new PlayerTarget.ByUuid(original.playerUuid())).profile().role());
+            assertEquals(Role.PLAYER, repository.resolveTarget(new PlayerTarget.ByName("Aeron")).profile().role());
+            assertEquals(replacement.playerUuid(), repository.resolveTarget(new PlayerTarget.ByName("Aeron")).profile().identity().uuid());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missingNickname", "invalidNickname", "negativeRevision", "missingRole"})
+    void resolverRejectsIncompleteOrInvalidStoredProfileState(String corruption) throws Exception {
+        for (String targetKind : List.of("uuid", "username", "nickname")) {
+            try (Database database = bootstrap(config(), "classpath:db/migration").initialize();
+                 var repository = ready(database, "alpha"); Connection admin = database.openConnection()) {
+                SessionStart owner = player("AccountName");
+                repository.join(owner);
+                set(repository.profiles(), owner.playerUuid(), "Aeron");
+                try (Statement fixture = admin.createStatement()) {
+                    switch (corruption) {
+                        case "missingNickname" -> fixture.executeUpdate("DELETE FROM player_nicknames");
+                        case "invalidNickname" -> {
+                            fixture.execute("ALTER TABLE player_nicknames DROP CONSTRAINT nickname_syntax");
+                            fixture.executeUpdate("UPDATE player_nicknames SET nickname = 'Admin'");
+                        }
+                        case "negativeRevision" -> {
+                            fixture.execute("ALTER TABLE player_nicknames DROP CONSTRAINT nickname_revision");
+                            fixture.executeUpdate("UPDATE player_nicknames SET revision = -1");
+                        }
+                        case "missingRole" -> fixture.executeUpdate("DELETE FROM player_authorizations");
+                        default -> throw new AssertionError("Unknown fixture");
+                    }
+                }
+                PlayerTarget target = switch (targetKind) {
+                    case "uuid" -> new PlayerTarget.ByUuid(owner.playerUuid());
+                    case "username" -> new PlayerTarget.ByName("AccountName");
+                    case "nickname" ->
+                            new PlayerTarget.ByName(corruption.equals("invalidNickname") ? "Admin" : "Aeron");
+                    default -> throw new AssertionError("Unknown fixture");
+                };
+                // An alias with no row no longer matches; known UUID/name lookups fail closed.
+                if (corruption.equals("missingNickname") && targetKind.equals("nickname")) {
+                    assertEquals(PlayerTargetResolution.missing(), repository.resolveTarget(target));
+                } else {
+                    PersistenceException failure = assertThrows(PersistenceException.class, () -> repository.resolveTarget(target));
+                    assertEquals(PersistenceException.Kind.DATABASE_FAILURE, failure.kind());
+                    assertNull(failure.getCause());
+                    assertFalse(failure.getMessage().contains(owner.playerUuid().toString()));
+                    assertEquals(PersistenceException.Kind.OWNERSHIP_LOST, assertThrows(PersistenceException.class,
+                            () -> repository.resolveTarget(target)).kind());
+                }
+            }
         }
     }
 

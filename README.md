@@ -85,13 +85,14 @@ An authorized request for the existing role creates neither a revision nor an au
 Use the actual local console, or an authenticated ADMIN/OWNER player:
 
 ```text
-role set <username|UUID> <PLAYER|MODERATOR|ADMIN|OWNER> <reason...>
+role set <username|nickname|UUID> <PLAYER|MODERATOR|ADMIN|OWNER> <reason...>
 ```
 
 The target must have a persisted player identity; offline targets are supported. A name
-matches the player's current stored username exactly, ignoring ASCII case. Old names,
-partial names and players who have never joined do not resolve. If more than one UUID has
-the same stored name, use a canonical UUID; Omega will not guess. No external identity
+matches the player's current stored username or nickname exactly, ignoring ASCII case.
+Historical usernames, former nicknames, partial names and players who have never joined
+do not resolve. Matching both names of one UUID counts once; matches to different UUIDs
+are ambiguous. Use a canonical UUID when a name is ambiguous. No external identity
 service is queried. Online names are suggested as the target is typed; offline names and
 UUIDs can still be entered directly. `/role set` and `/profile` advertise a player-profile
 target to clients so Bedrock can offer online player names. Command execution still uses
@@ -113,10 +114,12 @@ or assignable-role suggestions exposed by tab completion. The registered namespa
 been retired. Native management roots are summarized in ADMIN/OWNER help output.
 
 Connected players can use `/profile` for their own read-only profile or
-`/profile <current-username|UUID>` for a persisted player. The dialog currently shows the
+`/profile <current-username|nickname|UUID>` for a persisted player. The dialog currently shows the
 stored username, first successful join date in UTC, and the current stored staff role for
 Moderator, Admin, or Owner. Players with the ordinary Player role have no staff label.
-The role and identity come from one lookup; a missing authorization record fails closed.
+The role, identity and optional nickname come from one stored snapshot; missing or invalid
+authorization or nickname state fails closed for a uniquely matched player. Nickname
+rendering in the dialog belongs to the later presentation gate.
 The dialog does not invent Realm, Frontier, Slayer or achievement data. Lookup uses the
 existing bounded player worker and never blocks the command thread. A missing or ambiguous
 name opens no dialog. Current names include the
@@ -124,7 +127,7 @@ default Floodgate prefix, such as `.Unreference`; Java and Bedrock identities re
 unless an explicit account-linking feature is added. The same Paper dialog is sent to Java
 and translated by Geyser for Bedrock. `omegacore:profile` is the namespaced path; local
 console and delegated senders cannot open a profile dialog. Online names appear as target
-suggestions; offline current names and UUIDs remain valid when entered directly.
+suggestions; offline current names, current nicknames and UUIDs remain valid when entered directly.
 The public profile uses text and buttons on both editions. Player heads and portraits
 are outside v0.2; external portrait APIs and self-hosted head images are not planned.
 
@@ -140,8 +143,15 @@ unless an account reservation also protects it. Claims and account reservations 
 a transaction-scoped database lock across server IDs, with the existing query bounds.
 Existing migration files remain unchanged; `V008` seeds only currently recorded names.
 
-This is the persistence gate only: commands, nickname target resolution, chat/display
-caches, dialogs, and private notification delivery are not wired yet. The stored notice
+The shared resolver now accepts current nicknames through the same bounded worker and
+database read as account names and UUIDs. Historical account-name reservations and
+Floodgate's unprefixed reservation do not create targeting aliases. Once resolved, a
+mutation retains the UUID even if the nickname changes or is reused. `/role` and `/profile`
+already consume this resolver; their suggestions and help still use account names until
+the commands gate. No additional migration or alias cache is needed.
+
+`/nickname`, `/realname`, nickname suggestions, chat/profile presentation, editing dialogs,
+and private notification delivery remain in later gates. The stored notice
 remains pending until a later Paper adapter confirms delivery and queues acknowledgement.
 No extra pool, worker, timer, or external identity API is introduced. The
 [nickname contract](docs/NICKNAMES.md) records the gate boundaries and recovery behavior.

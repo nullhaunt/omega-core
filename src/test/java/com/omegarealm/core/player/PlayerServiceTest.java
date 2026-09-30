@@ -132,8 +132,11 @@ class PlayerServiceTest {
         FakeRepository repository = new FakeRepository();
         UUID uuid = UUID.randomUUID();
         PlayerProfile profile = new PlayerProfile(uuid, "Comet", JOINED, JOINED);
-        repository.targetResolution = target -> PlayerTargetResolution.found(
-                new PublicPlayerProfile(profile, Role.PLAYER));
+        PublicPlayerProfile snapshot = new PublicPlayerProfile(profile, Role.MODERATOR, Optional.of("Aeron"));
+        repository.targetResolution = target -> {
+            assertEquals(new PlayerTarget.ByName("aeron"), target);
+            return PlayerTargetResolution.found(snapshot);
+        };
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         PlayerServiceLimits bounded = limits(1, 256, Duration.ofSeconds(3), Duration.ofSeconds(3),
@@ -146,11 +149,11 @@ class PlayerServiceTest {
             });
             assertTrue(entered.await(2, TimeUnit.SECONDS));
             CompletionStage<PlayerTargetResolution> pending = harness.service.resolveTarget(
-                    new PlayerTarget.ByUsername("comet"));
+                    new PlayerTarget.ByName("aeron"));
             assertFalse(pending.toCompletableFuture().isDone());
             assertFailure(BUSY, harness.service.resolveTarget(new PlayerTarget.ByUuid(uuid)));
             release.countDown();
-            assertEquals(PlayerTargetResolution.found(new PublicPlayerProfile(profile, Role.PLAYER)), await(pending));
+            assertEquals(PlayerTargetResolution.found(snapshot), await(pending));
             assertTrue(harness.failures.isEmpty());
         } finally {
             release.countDown();
@@ -198,7 +201,7 @@ class PlayerServiceTest {
 
         try (Harness harness = new Harness(repository, LIMITS)) {
             CompletionStage<PlayerTargetResolution> pending = harness.service.resolveTarget(
-                    new PlayerTarget.ByUsername("Comet"));
+                    new PlayerTarget.ByName("Comet"));
             assertTrue(entered.await(2, TimeUnit.SECONDS));
             harness.service.requestStop(JOINED.plusSeconds(3600));
             assertFailure(UNAVAILABLE, pending);
@@ -227,7 +230,7 @@ class PlayerServiceTest {
 
         try (Harness harness = new Harness(repository, shortLookup)) {
             CompletionStage<PlayerTargetResolution> pending = harness.service.resolveTarget(
-                    new PlayerTarget.ByUsername("Comet"));
+                    new PlayerTarget.ByName("Comet"));
             assertTrue(entered.await(2, TimeUnit.SECONDS));
             assertFailure(UNAVAILABLE, pending);
             assertEquals(List.of("Player target lookup exceeded its deadline."), harness.failures);

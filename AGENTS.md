@@ -129,8 +129,10 @@ unrequested systems. Creating this file does not authorize the next implementati
   new versioned script. Restore the original script when accidental edits cause a checksum
   mismatch. Do not automatically baseline, repair, clean, or adopt an unmanaged nonempty schema.
 - UUID is authoritative player identity. Usernames are mutable metadata. Target resolution
-  accepts canonical UUIDs or exact current stored names, ignoring ASCII case; ambiguous names
-  must fail instead of guessing. Never duplicate name-lookup SQL in command handlers. Session
+  accepts canonical UUIDs or exact current stored usernames/nicknames, ignoring ASCII case;
+  matches to different UUIDs are ambiguous and must fail instead of guessing. Historical
+  account-name reservations are not aliases. Resolve once and retain that UUID for mutations.
+  Never duplicate name-lookup SQL in command handlers. Session
   uniqueness and recovery need an explicit join/reconnect contract before implementation.
 - Role changes require a reason and a durable audit in the same transaction. Recheck stored
   actor/target roles under locks acquired in UUID order; never trust a supplied role snapshot.
